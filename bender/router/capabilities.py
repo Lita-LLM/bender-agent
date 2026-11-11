@@ -7,7 +7,7 @@ KEYS=('vision','audio_input')
 def description(provider,model,key):
     if provider.get('kind')=='claude_code' and key=='vision':
         return {'value':True,'source':'client','at':None,'reason':'Картинки уходят в Claude Code изображениями (stream-json).'}
-    if provider.get('kind') in ('claude_code','codex_cli'):
+    if provider.get('kind') in ('claude_code','codex_cli','antigravity'):
         return {'value':False,'source':'client','at':None,'reason':'Текстовый CLI-протокол Бендера не передаёт исходные медиа; используй роль Зрение/Уши.'}
     records=provider.get('model_capabilities')
     stored=records.get(model,{}) if isinstance(records,dict) else {}

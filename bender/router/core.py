@@ -363,6 +363,12 @@ class Switchboard:
             except (ValueError,TypeError,AttributeError,KeyError,IndexError,RecursionError) as exc:
                 raise ProviderError('protocol',provider=p.get('name','CLI'),model=cand.model,message='CLI прислал некорректное событие',raw=type(exc).__name__,
                                     partial={'actions':bool(tools and getattr(self,'cli_bridge',None))}) from None
+        if p.get('kind') == 'antigravity':
+            from .agy import run_agy
+            try:
+                return await run_agy(self,cand,messages,tools,params,relay)
+            except (ValueError,TypeError,AttributeError,KeyError,IndexError,RecursionError) as exc:
+                raise ProviderError('protocol',provider=p.get('name','agy'),model=cand.model,message='agy прислал некорректное событие',raw=type(exc).__name__) from None
         ad = adapter_for(p)
         proto = self.protocol(cand, tools, params)
         params = {k: v for k, v in params.items() if k != "tool_protocol"}

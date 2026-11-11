@@ -364,6 +364,10 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
             if b.get("billing") in ("api", "subscription"):
                 extra["billing"] = b["billing"]
                 extra["subscription"] = b["billing"] == "subscription"
+        if b.get("preset") == "antigravity":
+            extra["risk_accepted"] = b.get("risk_accepted") is True
+            if b.get("command"):
+                extra["command"] = str(b["command"]).strip()
         p = app.models.add_provider(preset=b.get("preset") or None, name=b.get("name") or "", kind=b.get("kind") or "openai",
                                     base_url=b.get("base_url") or "", api_key=b.get("api_key") or None, extra=extra or None)
         app.journal.write("models", f"Подключён провайдер {p['name']}", actor="owner", data={"id": p["id"], "base_url": p["base_url"]})

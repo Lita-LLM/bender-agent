@@ -6,7 +6,7 @@ import { PendingCards } from "./chat.js";
 
 import { useEvents } from "../lib/store.js";
 
-const KEYLESS = ["ollama", "llamacpp", "lmstudio", "fake", "omniroute", "claude_code", "codex_cli"];
+const KEYLESS = ["ollama", "llamacpp", "lmstudio", "fake", "omniroute", "claude_code", "codex_cli", "antigravity"];
 
 function OtherCliSetup({ kind, busy, onConnect }) {
   const [command, setCommand] = useState("");
@@ -134,7 +134,8 @@ export function SetupModel({ onDone, role = "main" }) {
     setBusy(true); setErr(null);
     try {
       if(preset==='local_voice'){await post('/api/voice/local/connect');onDone&&onDone();setBusy(false);return;}
-      const body = preset === "custom" ? { name: "Свой провайдер", base_url: url, kind, api_key: key } : { preset, base_url: url || undefined, api_key: key, ...more };
+      if (preset === 'antigravity' && !confirm('Google не поддерживает обёртки agy на личных планах и может заблокировать аккаунт. Принимаешь риск?')) { setBusy(false); return; }
+      const body = preset === "custom" ? { name: "Свой провайдер", base_url: url, kind, api_key: key } : { preset, base_url: url || undefined, api_key: key, ...(preset === "antigravity" ? { risk_accepted: true } : {}), ...more };
       const r = await post("/api/providers", body);
       setProvider(r.provider);
       try { const c = await post(`/api/providers/${r.provider.id}/catalog`); setModels(c.models); if (!role) { toast(`Подключён ${r.provider.name}: моделей ${c.models.length}`, "ok"); onDone && onDone(); } }

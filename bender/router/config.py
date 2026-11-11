@@ -36,6 +36,8 @@ ROLES = {
 PRESETS = {
     "chatgpt": {"name": "ChatGPT (подписка)", "kind": "chatgpt", "base_url": "https://chatgpt.com/backend-api/codex", "oauth": True},
     "claude_code": {"name": "Claude Code (на этой машине)", "kind": "claude_code", "subscription": True},
+    "antigravity": {"name": "Antigravity (agy, превью, риск блокировки)", "kind": "antigravity", "subscription": True,
+                    "note": "Только текст и роли без тулов. Google не поддерживает обёртки agy на личных планах и может заблокировать аккаунт: при подключении нужно подтвердить риск."},
     "codex_cli": {"name": "Codex CLI (пока недоступен как движок)", "kind": "codex_cli", "blocked": True},
     "openrouter": {"name": "OpenRouter", "kind": "openai", "base_url": "https://openrouter.ai/api/v1"},
     "openai": {"name": "OpenAI", "kind": "openai", "base_url": "https://api.openai.com/v1"},
@@ -119,7 +121,7 @@ class ModelsConfig:
         base = dict(PRESETS.get(preset or "", {}))
         if base.get("blocked") or kind == "codex_cli":
             raise HumanError("cli_unsafe", "Codex CLI пока нельзя подключить как движок", "Не подтверждён способ выключить все встроенные инструменты; проверь сведения в Полигоне.")
-        cli = (base.get("kind") if preset else kind) == "claude_code"
+        cli = (base.get("kind") if preset else kind) in ("claude_code", "antigravity")
         p = {"id": "p" + new_id()[-10:].lower(), "name": name or base.get("name") or "Провайдер", "kind": kind or base.get("kind", "openai"),
              "base_url": "" if cli else normalize_base_url(base_url or base.get("base_url", "")), "keys": [], "enabled": True, "timeout": 300, "parallel": 4,
              "is_local": bool(base.get("is_local")), "free": bool(base.get("free")), "created_at": time.time()}
@@ -130,13 +132,19 @@ class ModelsConfig:
                 if field in base:p[field]=base[field]
         if kind and not preset:
             p["kind"] = kind
-        if p["kind"] not in ("openai", "anthropic", "chatgpt", "claude_code"):
+        if p["kind"] == "antigravity":
+            from .agy import RISK
+            if not (extra or {}).get("risk_accepted"):
+                raise HumanError("agy_risk", "Нужно принять риск Antigravity", RISK)
+            p.update({"subscription": True, "parallel": 1, "timeout": 600, "models": [{"id": "default", "subscription": True}]})
+            extra = {k: v for k, v in (extra or {}).items() if k in ("command", "risk_accepted")}
+        elif p["kind"] not in ("openai", "anthropic", "chatgpt", "claude_code"):
             raise HumanError("bad_provider", f"Неизвестный вид API «{p['kind']}»", "Бывает openai (OpenAI-совместимый), anthropic, chatgpt (подписка) или claude_code (Claude Code на этой машине).")
         if p["kind"] == "claude_code":
             p.update({"subscription": bool(base.get("subscription", True)), "parallel": 1, "timeout": 1800,
                       "models": [{"id": m, "subscription": True} for m in ("default", "opus", "sonnet", "fable", "haiku")]})
         p.update(extra or {})
-        if p['kind'] not in ('openai', 'anthropic', 'chatgpt', 'claude_code'):
+        if p['kind'] not in ('openai', 'anthropic', 'chatgpt', 'claude_code', 'antigravity'):
             raise HumanError('bad_provider', 'Этот вид провайдера недоступен', 'Выбери API, ChatGPT или Claude Code.')
         if p["kind"] == "claude_code" and p.get("billing") == "api":
             p["subscription"] = False
