@@ -375,7 +375,11 @@ class Commands:
         elif command=='members':
             if int(chat)>0:raise HumanError('members','Список людей — у группы','Напиши /members в самой группе: /members add 12345678, /members remove 12345678, /members off.')
             row=self.tg.groups.policy(int(chat));current=list(row['members']);words=arg.split()
-            if words[:1]==['wake'] and words[1:2] in (['on'],['off']):
+            if words[:1]==['import']:
+                found=[i for i in (self.host.store.meta_get('telegram:group_allow_import') or []) if isinstance(i,int)]
+                if not found:raise HumanError('members','Нечего импортировать','Список людей для групп переносится из OpenClaw вместе с переездом (groupAllowFrom).')
+                current=list(dict.fromkeys(current+found));await self.tg.groups.configure(int(chat),{'members':current})
+            elif words[:1]==['wake'] and words[1:2] in (['on'],['off']):
                 await self.tg.groups.configure(int(chat),{'wake':words[1]=='on'});row=self.tg.groups.policy(int(chat))
                 if row['wake'] and not current:raise HumanError('members','Включено, но список пуст','Сначала /members add НОМЕР: будить бота смогут только люди из списка.')
             elif words[:1] and words[0] in ('add','remove','off','добавить','убрать','выкл'):

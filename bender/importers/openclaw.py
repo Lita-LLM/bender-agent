@@ -1175,15 +1175,18 @@ class Planner:
         ch = self.cfg.get("channels") if isinstance(self.cfg.get("channels"), dict) else {}
         if ch:
             tg_ids: list[int] = []
+            tg_groups: list[int] = []
             if isinstance(ch.get("telegram"), dict):
                 from ..channels.adopt import owner_ids
 
                 pairing = [r[0] for r in rows(self.sdb, "SELECT entry FROM channel_pairing_allow_entries WHERE channel_key = 'telegram' ORDER BY sort_order")]
                 tg_ids = owner_ids(ch["telegram"], pairing)
+                from ..channels.adopt import group_allow_ids
+                tg_groups = group_allow_ids(ch["telegram"])
             note = "Telegram станет каналом Бендера (выключенным: включишь в «Связи», когда остановишь OpenClaw); остальные — потом" if "telegram" in ch \
                 else "подключатся позже (Связь); токены — в сейф, если разрешишь"
             if isinstance(ch.get('matrix'),dict):note+='; Matrix: предложение адреса/комнат в Связях, выключено до просмотра и новой привязки; E2EE не переносится'
-            self.add("archive:channels", "archive", "Каналы: " + ", ".join(ch), "archive", note=note, payload={"channels": redact(ch), "telegram_owner_ids": tg_ids})
+            self.add("archive:channels", "archive", "Каналы: " + ", ".join(ch), "archive", note=note, payload={"channels": redact(ch), "telegram_owner_ids": tg_ids, "telegram_group_allow": tg_groups})
             for path, val in walk_secrets(ch, "channels"):
                 v = resolve_secret(val, self.warnings, path)
                 if v:
@@ -1556,8 +1559,8 @@ def apply(plan: Plan, app, *, skip: set[str] | None = None, only: set[str] | Non
         from ..channels.adopt import adopt as adopt_telegram
 
         try:
-            tg = adopt_telegram(app, list(chi.payload.get("telegram_owner_ids") or []))
-            if tg.get("token") or tg.get("owner"):
+            tg = adopt_telegram(app, list(chi.payload.get("telegram_owner_ids") or []), list(chi.payload.get("telegram_group_allow") or []))
+            if tg.get("token") or tg.get("owner") or tg.get("group_allow"):
                 rep.done.append("Telegram готов к включению в «Связи»")
         except Exception as e:  # noqa: BLE001
             rep.errors.append(f"Telegram: {e}")

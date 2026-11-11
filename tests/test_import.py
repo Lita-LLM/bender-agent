@@ -457,12 +457,13 @@ class TelegramImportTest(ImportCase):
 
         cfg_path = self.src / "openclaw.json"
         cfg = json5.loads(cfg_path.read_text(encoding="utf-8"))
-        cfg["channels"] = {"telegram": {"enabled": True, "botToken": "123456789:AAEfixture-token-fixture-token-xx", "dmPolicy": "allowlist", "allowFrom": ["tg:424242"]}}
+        cfg["channels"] = {"telegram": {"enabled": True, "botToken": "123456789:AAEfixture-token-fixture-token-xx", "dmPolicy": "allowlist", "allowFrom": ["tg:424242"], "groupAllowFrom": ["tg:555555", "777777", "@name", 12]}}
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
         plan = self.plan()
         it = plan.item("archive:channels")
         self.assertIn("Telegram станет каналом", it.note)
         self.assertEqual(it.payload["telegram_owner_ids"], [424242])
+        self.assertEqual(it.payload["telegram_group_allow"], [555555, 777777])  # имена и короткие числа не берём
         self.assertNotIn("AAEfixture", json.dumps(plan.public(), ensure_ascii=False))
         rep = oc.apply(plan, self.app)
         self.assertEqual(rep.errors, [])
@@ -470,6 +471,7 @@ class TelegramImportTest(ImportCase):
         self.assertEqual(self.app.store.meta_get(OWNER_META)["user_id"], 424242)
         self.assertFalse(self.app.settings.get("telegram", "enabled"))  # включает хозяин, когда остановит OpenClaw
         self.assertIn("Telegram готов к включению в «Связи»", rep.done)
+        self.assertEqual(self.app.store.meta_get("telegram:group_allow_import"), [555555, 777777])
 
 
 if __name__ == "__main__":

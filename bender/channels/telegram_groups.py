@@ -96,12 +96,24 @@ class Groups:
         allowed=action.actor=='system' and action.tool=='telegram_group_leave' and bool(row) and not row.get('owner_added') and self.active(row.get('member',{})) is True and self.host.settings.get('telegram','leave_unknown_groups',True) and not(rule and rule.get('verdict')=='deny')
         return Decision('allow' if allowed else 'deny','Автоматический выход разрешён только службе для чужого добавления по настройке хозяина.','telegram-leave',False)
 
+    def seen(self,chat,sender):
+        """Кто писал в группе: только номер, имя и время, без текста — чтобы хозяин мог добавить человека в список кнопкой."""
+        if sender.get('id') is None or sender.get('is_bot'):return
+        key='telegram:group_seen:'+str(chat);rows=[r for r in self.host.store.meta_get(key,[]) if r.get('id')!=sender['id']]
+        rows.insert(0,{'id':sender['id'],'name':(str(sender.get('first_name') or sender.get('username') or sender['id']))[:60],'at':time.time()})
+        self.host.store.meta_set(key,rows[:15])
+
     def rows(self,ctx=None):
         rows=list(self.host.store.meta_get('telegram:chats',{}).values())
         if ctx is not None and ctx.agent_id!='main':
             bound={chat for key,chat in self.host.store.meta_get('telegram:sessions',{}).items() if key.split(':',1)[0]==ctx.agent_id}
             rows=[row for row in rows if row['id'] in bound]
-        return [{**row,'allowed':self.allowed(row['id']),'context':bool(self.policy(row['id']).get('context'))} for row in rows]
+        out=[]
+        for row in rows:
+            policy=self.policy(row['id'])
+            out.append({**row,'allowed':self.allowed(row['id']),'context':bool(policy.get('context')),'members':policy['members'],'wake':policy['wake'],
+                        'seen':self.host.store.meta_get('telegram:group_seen:'+str(row['id']),[])})
+        return out
 
     async def configure(self,chat,changes):
         if any(key not in ('enabled','context','members','wake') or (key=='members' and (not isinstance(value,list) or len(value)>200 or any(isinstance(i,bool) or not isinstance(i,int) for i in value))) or (key!='members' and not isinstance(value,bool)) for key,value in changes.items()):
@@ -131,6 +143,7 @@ class Groups:
             return None
         if sender.get('id')!=owner.get('user_id'):
             policy=self.policy(ident);members=policy['members']
+            self.seen(ident,sender)
             if members and sender.get('id') not in members:return None  # список задан: посторонних бот не запоминает вовсе
             if members and policy['wake']:
                 username=(self.tg.me or {}).get('username');text=str(rich_body(msg))

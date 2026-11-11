@@ -46,7 +46,13 @@ function TelegramChats({settings,setS}) {
     ${rows.length?rows.map(row=>html`<div class="list-item" data-chat=${row.id}><div class="li-main"><b>${row.chat.title||row.chat.first_name||row.id}</b><div class="faint small">${row.chat.type} · ${row.id} · добавил ${row.added_by?.first_name||row.added_by?.id||'неизвестно'}${row.added_at?' · '+new Date(row.added_at*1000).toLocaleString('ru-RU'):''}</div>
       ${row.member?html`<details><summary class="faint small">Права, сообщённые Telegram</summary><pre class="block">${JSON.stringify(row.member,null,2)}</pre></details>`:null}
       <${Toggle} label=${'Разрешить группу '+row.id} checked=${row.allowed} onChange=${value=>change(row,{enabled:value})}/>
-      <${Toggle} label=${'Контекст участников '+row.id} checked=${row.context} onChange=${value=>change(row,{context:value})}/></div></div>`):html`<div class="faint">Telegram пока не прислал обновлений о чатах.</div>`}
+      <${Toggle} label=${'Контекст участников '+row.id} checked=${row.context} onChange=${value=>change(row,{context:value})}/>
+      <details><summary class="faint small">Кого бот видит (превью): ${row.members.length?row.members.length+' чел.':'всех'}</summary>
+        <p class="faint small">Пока список пуст, действуют прежние правила. Когда в нём кто-то есть, остальных бот не запоминает вовсе.</p>
+        ${row.members.map(id=>html`<div class="row"><span class="grow">${(row.seen.find(s=>s.id===id)||{}).name||id} <span class="faint">${id}</span></span><${Button} small onClick=${()=>change(row,{members:row.members.filter(m=>m!==id)})}>Убрать</${Button}></div>`)}
+        ${row.seen.filter(s=>!row.members.includes(s.id)).length?html`<div class="faint small">Недавно писали:</div>`:null}
+        ${row.seen.filter(s=>!row.members.includes(s.id)).map(s=>html`<div class="row"><span class="grow">${s.name} <span class="faint">${s.id}</span></span><${Button} small onClick=${()=>change(row,{members:[...row.members,s.id]})}>Добавить</${Button}></div>`)}
+        <${Toggle} label=${'Люди из списка будят бота '+row.id} checked=${row.wake} disabled=${!row.members.length} onChange=${value=>change(row,{wake:value})}/></details></div></div>`):html`<div class="faint">Telegram пока не прислал обновлений о чатах.</div>`}
   </details>`;
 }
 
