@@ -1,0 +1,6 @@
+model:
+  default: demo-model
+  provider: openai
+  base_url: https://example.invalid/v1
+api_key: НЕ_НАСТОЯЩИЙ_КЛЮЧ
+unknown_setting: сохраняется в архиве

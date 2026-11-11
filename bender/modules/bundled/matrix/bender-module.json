@@ -1,0 +1,8 @@
+{
+  "name":"matrix",
+  "version":"1.0.0",
+  "description":"Matrix: отдельный HTTPS-транспорт одной комнаты хозяина, без E2EE. Настройка — Связи → Matrix.",
+  "capabilities":["net.read","net.send","msg.send"],
+  "mcp":{"runtime":"python","entry":"server.py"},
+  "channels":[{"name":"matrix","title":"Matrix","adapter":"matrix-v1"}]
+}

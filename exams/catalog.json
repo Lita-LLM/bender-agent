@@ -1,0 +1,8 @@
+[
+  {"id":"memory","kind":"unittest","title":"Запись и чтение памяти"},
+  {"id":"danger","kind":"unittest","title":"Отказ опасной команде"},
+  {"id":"unattended","kind":"unittest","title":"Без хозяина нельзя подтвердить действие"},
+  {"id":"taint","kind":"unittest","title":"Заражение требует решения хозяина"},
+  {"id":"quarantine","kind":"unittest","title":"Чужой навык не включается сам"},
+  {"id":"agent","kind":"agent","title":"Ход на фальшивой модели: файл и ответ"}
+]

@@ -1,0 +1,67 @@
+// Пакет в карантине, реальный MCP, изолированная страница и кандидат обновления.
+const { chromium } = require("playwright");
+const fs = require("fs");
+const path = require("path");
+async function main() {
+  const source = path.resolve(process.argv[2], "source-module");
+  fs.cpSync(path.resolve(__dirname, "../fixtures/module_demo"), source, { recursive: true });
+  const browser = await chromium.launch();
+  try {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", e => errors.push(e.message));
+    page.on("console", m => { if (m.type() === "error") errors.push(m.text()); });
+    await page.goto(process.env.BENDER_URL + "/#/modules");
+    await page.getByLabel("Источник модуля", { exact: true }).fill(source);
+    await page.getByRole("button", { name: "Установить в карантин", exact: true }).click();
+    await page.waitForSelector(".approval:has-text('прочитать пакет модуля')");
+    await page.getByRole("button", { name: "Разрешить один раз", exact: true }).click();
+    await page.waitForSelector(".module-card .badge:has-text('Карантин')");
+    await page.getByRole("button", { name: "Просмотреть пакет", exact: true }).click();
+    await page.waitForSelector(".module-text:has-text('capabilities')");
+    await page.selectOption(".module-preview select", "server.py");
+    await page.waitForSelector(".module-text:has-text('import json')");
+    await page.selectOption(".module-preview select", "bender-module.json");
+    await page.getByRole("button", { name: "Одобрить просмотренный пакет", exact: true }).click();
+    await page.waitForSelector(".module-card .badge.green");
+    await page.locator(".module-page summary").click();
+    await page.frameLocator(".module-frame").getByRole("heading", { name: "Пример модуля" }).waitFor();
+    const frame = page.frames().find(f => f.url().includes("/api/modules/demo/page/"));
+    if (await frame.evaluate(() => { try { return !!parent.document.body; } catch { return false; } })) throw Error("Страница модуля читает пульт");
+    await page.getByRole("button", { name: "Обнаружить инструменты", exact: true }).click();
+    await page.waitForSelector(".approval:has-text('подключить MCP')");
+    await page.getByRole("button", { name: "Разрешить один раз", exact: true }).click();
+    await page.getByRole("button", { name: "Одобрить определения инструментов", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Одобрить определения инструментов", exact: true }).click();
+    const catalog = await (await page.request.get(process.env.BENDER_URL + "/api/mcp")).json();
+    const alias = catalog.servers.find(s => s.module === "demo").tools[0].alias;
+    await page.goto(process.env.BENDER_URL + "/#/polygon");
+    await page.selectOption("select.select", alias);
+    await page.fill("textarea.textarea.mono", JSON.stringify({ text: "Проверка модуля" }));
+    await page.getByRole("button", { name: "Выполнить", exact: true }).click();
+    const guard = await context.newPage();
+    await guard.goto(process.env.BENDER_URL + "/#/guard");
+    await guard.waitForSelector(".approval:has-text('MCP mod_')");
+    await guard.getByRole("button", { name: "Разрешить один раз", exact: true }).click();
+    await page.waitForSelector("pre:has-text('Модуль: Проверка модуля')");
+    await guard.close();
+    const manifest = path.join(source, "bender-module.json");
+    const data = JSON.parse(fs.readFileSync(manifest)); data.version = "2.0.0";
+    fs.writeFileSync(manifest, JSON.stringify(data));
+    await page.goto(process.env.BENDER_URL + "/#/modules");
+    await page.getByLabel("Источник модуля", { exact: true }).fill(source);
+    await page.getByRole("button", { name: "Установить в карантин", exact: true }).click();
+    await page.waitForSelector(".approval:has-text('прочитать пакет модуля')");
+    await page.getByRole("button", { name: "Разрешить один раз", exact: true }).click();
+    await page.getByRole("button", { name: "Просмотреть обновление 2.0.0", exact: true }).click();
+    await page.waitForSelector(".module-text:has-text('2.0.0')");
+    await page.screenshot({ path: path.join(process.argv[2], "modules.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(250);
+    if (await page.locator(".page").evaluate(e => e.scrollWidth > e.clientWidth)) throw Error("Страница модулей шире телефона");
+    if (errors.length) throw Error(errors.join("\n"));
+    console.log("Модули: карантин, MCP/Предохранитель, отдельный iframe и обновление — OK");
+  } finally { await browser.close(); }
+}
+main().catch(e => { console.error(e); process.exit(1); });

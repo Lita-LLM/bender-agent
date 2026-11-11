@@ -1,0 +1,34 @@
+// Источник/recall, правка с причиной, фильтры/экспорт/цепочка, старый дифф на телефоне.
+const {chromium}=require('playwright'),fs=require('fs');
+(async()=>{const browser=await chromium.launch();try{
+ const page=await browser.newPage({viewport:{width:1280,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(process.env.BENDER_URL+'/#/memory');
+ await page.getByRole('button',{name:'Поиск',exact:true}).click();
+ await page.getByPlaceholder('Что вспомнить? Так же ищет агент тулом recall').fill('расписание');
+ await page.getByRole('button',{name:'Найти',exact:true}).click();
+ const card=page.locator('.hit').filter({hasText:'проверять мосты'});await card.getByRole('button',{name:'Инспектор',exact:true}).click();
+ await page.getByText(/Recall: 1 раз/).waitFor();
+ await page.getByLabel('Новый текст записи').fill('- Расписание: проверять мосты по субботам.');
+ await page.getByLabel('Причина изменения').fill('Хозяин перенёс осмотр');
+ await page.getByRole('button',{name:'Сохранить правку',exact:true}).click();
+ await page.locator('.hit').filter({hasText:'по субботам'}).waitFor();
+ await page.screenshot({path:process.argv[2]+'/memory-inspector.png',fullPage:true});
+ await page.goto(process.env.BENDER_URL+'/#/journal');
+ await page.getByText('Фильтры и экспорт',{exact:true}).click();
+ await page.getByLabel('Кто',{exact:true}).fill('agent');await page.getByLabel('Способность',{exact:true}).fill('fs.write');
+ await page.getByRole('button',{name:'Применить фильтры',exact:true}).click();
+ await page.locator('tbody tr').filter({hasText:'Проверка фильтра'}).waitFor();
+ const download=page.waitForEvent('download');await page.getByRole('link',{name:'Экспорт выборки',exact:true}).click();
+ const file=await download;await file.saveAs(process.argv[2]+'/journal.json');
+ const exported=JSON.parse(fs.readFileSync(process.argv[2]+'/journal.json','utf8'));
+ if(exported.entries.length!==1||exported.entries[0].actor!=='agent')throw Error('Экспорт не совпадает с фильтром');
+ await page.getByRole('button',{name:'Проверить цепочку',exact:true}).click();await page.getByText(/Цепочка цела/).waitFor();
+ await page.getByRole('button',{name:'Открыть ход и запросы',exact:true}).click();
+ await page.getByRole('button',{name:/main · пример/}).click();await page.getByText('Расписание проверок',{exact:true}).first().waitFor();
+ await page.goto(process.env.BENDER_URL+'/#/workshop');
+ await page.setViewportSize({width:390,height:844});await page.locator('.sidebar').waitFor({state:'hidden'});
+ await page.locator('.legacy-core summary').first().click();await page.getByLabel('Только изменения',{exact:true}).waitFor();
+ if(await page.locator('.legacy-core .wrap-diff').count()!==1)throw Error('Нет переноса длинного диффа');
+ await page.screenshot({path:process.argv[2]+'/diff-phone.png',fullPage:true});
+ if(errors.length)throw Error(errors.join('\n'));
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

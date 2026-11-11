@@ -1,0 +1,10 @@
+{
+  "name": "demo",
+  "version": "1.0.0",
+  "description": "Пример отдельного MCP-процесса и статической страницы",
+  "capabilities": [],
+  "mcp": {"runtime": "python", "entry": "server.py"},
+  "pages": [{"path": "index.html", "title": "Пример модуля"}],
+  "providers": [],
+  "channels": [{"name": "events", "title": "События примера"}]
+}

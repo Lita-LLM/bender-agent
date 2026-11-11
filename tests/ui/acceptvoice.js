@@ -1,0 +1,35 @@
+// Починка ссылок, подключение без установки и выбор локальных Ушей с телефона.
+const {chromium}=require('playwright');
+(async()=>{const browser=await chromium.launch();try{
+ const page=await browser.newPage({viewport:{width:1280,height:1000}}),errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(process.env.BENDER_URL+'/#/models');
+ await page.getByRole('heading',{name:'Повреждённые ссылки в ролях: 2',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Починить ссылки в ролях',exact:true}).click();
+ await page.getByText('Удалены повреждённые кандидаты: 2.',{exact:false}).waitFor();
+ if(await page.getByRole('heading',{name:/Повреждённые ссылки/}).count())throw Error('Ссылки остались после починки');
+ await page.goto(process.env.BENDER_URL+'/#/doctor');
+ await page.getByRole('heading',{name:'❌ Ссылки в ролях моделей',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Починить ссылки в ролях',exact:true}).click();
+ await page.getByRole('heading',{name:'✅ Ссылки в ролях моделей',exact:true}).waitFor();
+ await Promise.all([page.waitForNavigation(),page.getByLabel('Выбрать агента',{exact:true}).selectOption('listener')]);
+ await page.goto(process.env.BENDER_URL+'/#/models');
+ const card=page.locator('.card').filter({has:page.getByRole('heading',{name:'Локальный голос на этой машине',exact:true})});
+ await card.getByRole('button',{name:'Подключить этому агенту',exact:true}).click();
+ await card.getByText('Агент listener: Уши подключены, Голос подключён; голос включён.',{exact:true}).waitFor();
+ const state=await (await page.request.get(process.env.BENDER_URL+'/api/voice/local',{headers:{'X-Bender-Agent':'listener'}})).json();
+ if(!state.connected||!state.enabled)throw Error('Голос второго агента не подключён');
+ await page.getByRole('button',{name:'Подключить Уши',exact:true}).click();
+ await page.getByLabel('Откуда',{exact:true}).selectOption('local_voice');
+ await page.getByRole('button',{name:'Подключить установленный голос',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Подключить установленный голос',exact:true}).click();
+ await page.getByRole('heading',{name:'Подключить провайдера',exact:true}).waitFor({state:'hidden'});
+ await page.screenshot({path:process.argv[2]+'/voice-agent.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});
+ const scrim=page.locator('.sidebar-scrim');if(await scrim.isVisible())await scrim.click();
+ await page.locator('.sidebar').waitFor({state:'hidden'});
+ if(await page.locator('.page').evaluate(e=>e.scrollWidth>e.clientWidth+1))throw Error('Голос шире телефона');
+ await page.screenshot({path:process.argv[2]+'/voice-agent-phone.png',fullPage:true});
+ if(errors.length)throw Error(errors.join('\n'));
+ console.log('Приёмка голоса: починка ссылок, все агенты, подключение без установки и телефон — OK');
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

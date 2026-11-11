@@ -1,0 +1,122 @@
+{
+  "agents": {
+    "defaults": {
+      "authInheritance": {
+        "agentId": "main"
+      },
+      "workspace": "/tmp/oc-home/.openclaw/workspace",
+      "models": {
+        "custom-127-0-0-1-5199/echo": {}
+      },
+      "model": {
+        "primary": "custom-127-0-0-1-5199/echo"
+      }
+    },
+    "entries": {
+      "tin": {
+        "name": "tin",
+        "workspace": "/tmp/oc-home/.openclaw/workspace",
+        "agentDir": "/tmp/oc-home/.openclaw/agents/tin/agent",
+        "identity": {
+          "name": "tin"
+        }
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "anthropic": {
+        "config": {
+          "sessionCatalog": {
+            "enabled": false
+          }
+        }
+      },
+      "codex": {
+        "config": {
+          "sessionCatalog": {
+            "enabled": false
+          }
+        }
+      }
+    }
+  },
+  "meta": {
+    "migrations": {
+      "modelPolicyAllowlist": true,
+      "utilityModelSeparation": true
+    },
+    "lastTouchedVersion": "2026.10.5"
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "fixture-gateway-token"
+    },
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off"
+    }
+  },
+  "tools": {
+    "profile": "full"
+  },
+  "skills": {
+    "install": {
+      "nodeManager": "npm"
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "custom-127-0-0-1-5199": {
+        "baseUrl": "http://127.0.0.1:5199/v1",
+        "api": "openai-completions",
+        "apiKey": "sk-fake-123456",
+        "models": [
+          {
+            "id": "echo",
+            "name": "echo (Custom Provider)",
+            "contextWindow": 128000,
+            "maxTokens": 4096,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  },
+  "hooks": {
+    "internal": {
+      "entries": {
+        "session-memory": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-10-21T23:42:35.276Z",
+    "lastRunVersion": "2026.10.5",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "auth": {
+    "profiles": {
+      "openrouter:manual": {
+        "provider": "openrouter",
+        "mode": "api_key"
+      }
+    }
+  }
+}

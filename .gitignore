@@ -1,0 +1,39 @@
+# Данные хозяина: личность, память, сейф, база — никогда в репозиторий
+/data/
+
+# Слоты версий для обновлений и отката
+/versions/
+
+# Следы установки и обновлений
+install.log
+nohup.out
+install-report.txt
+*.partial
+
+# Ключи — на всякий случай
+*.pem
+*.key
+# Общедоступная TLS-фикстура localhost для тестов OAuth, не ключ установки.
+!tests/fixtures/mcp-oauth-cert.pem
+!tests/fixtures/mcp-oauth-key.pem
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Редакторы и ОС
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Запускалки, которые пишет установщик под эту машину
+/bender.sh
+/Бендер.bat
