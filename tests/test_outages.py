@@ -71,7 +71,8 @@ class OutageTest(TempDirCase):
             with patch('bender.channels.mail.asyncio',clock),patch.object(app.mail,'poll',side_effect=poll):
                 task=asyncio.create_task(app.mail._run())
                 try:
-                    await asyncio.wait_for(success.wait(),3)
+                    # Windows сообщает отказ TCP медленнее Linux; виртуальные паузы проверяем прежними числами.
+                    await asyncio.wait_for(success.wait(),15)
                     self.assertEqual(app.mail.state,'ok')
                     self.assertLessEqual(len(attempts),7)
                     self.assertGreaterEqual(clock.now,600)

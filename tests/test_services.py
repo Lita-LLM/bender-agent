@@ -1,5 +1,6 @@
 """Автозапуск только на временном HOME: PATH, ручная копия, голос и Termux."""
 import os
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from bender.core import service
 from tests.helpers import TempDirCase,async_test
 
 
+@unittest.skipUnless(os.name=='posix','Автозапуск systemd/Termux требует POSIX-пути')
 class ServiceTest(TempDirCase):
     @async_test
     async def test_manual_copy_enables_without_second_start_and_preserves_path(self):
@@ -57,7 +59,7 @@ class ServiceTest(TempDirCase):
                 self.assertIn('Termux:Boot',result['message'])
                 text=service.unit_path().read_text();self.assertIn('termux-wake-lock',text)
                 self.assertIn('BENDER_SERVICE_KIND=termux',text)
-                self.assertEqual(service.unit_path().stat().st_mode&0o777,0o700)
+                if os.name=='posix':self.assertEqual(service.unit_path().stat().st_mode&0o777,0o700)
                 command.assert_not_called()
                 await service.change(app,'remove');self.assertFalse(service.unit_path().exists())
                 app.guard.add_rule('system.service','*','deny')

@@ -42,7 +42,8 @@ class ScreenTest(TempDirCase):
             result = await env.app.tools.run('screen_windows', {}, ctx)
             self.assertFalse(result.ok);self.assertIn('выключена', result.content)
             env.app.settings.set('screen', {'enabled': True, 'programs': ['notepad.exe']}, by='owner')
-            result = await env.app.tools.run('screen_windows', {}, ctx)
+            with mock.patch.object(screen.sys,'platform','linux'):
+                result = await env.app.tools.run('screen_windows', {}, ctx)
             self.assertIn('только на Windows', result.content)
 
     @async_test

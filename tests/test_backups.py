@@ -1,5 +1,6 @@
 """Инкремент, порча, согласованная SQLite и совместимость описей."""
 import json
+import os
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -30,7 +31,8 @@ class BackupTest(TempDirCase):
             self.assertIn('work/hello.txt', app.backups.preview(first['id'], target)['changed'])
             await app.backups.restore(first['id'], target)
             self.assertEqual((target/'work/hello.txt').read_text(), 'память')
-            self.assertEqual((target/'work/task.py').stat().st_mode & 0o777, 0o700)
+            self.assertEqual((target/'work/task.py').read_bytes(),executable.read_bytes())
+            if os.name=='posix':self.assertEqual((target/'work/task.py').stat().st_mode & 0o777, 0o700)
             with closing(sqlite3.connect(target/'bender.db')) as db:
                 self.assertEqual(db.execute('PRAGMA quick_check').fetchone()[0], 'ok')
                 self.assertGreater(db.execute('SELECT count(*) FROM journal').fetchone()[0], 0)
@@ -64,7 +66,7 @@ class BackupTest(TempDirCase):
             path.write_text(json.dumps(value))
             target=self.tmp/'legacy'
             await app.backups.restore(saved['id'],target)
-            self.assertEqual((target/'secrets.json').stat().st_mode & 0o777,0o600)
+            if os.name=='posix':self.assertEqual((target/'secrets.json').stat().st_mode & 0o777,0o600)
             value['schemas']={'schema:base':999}
             path.write_text(json.dumps(value))
             with self.assertRaises(HumanError): app.backups.preview(saved['id'], self.tmp/'future')

@@ -69,7 +69,7 @@ disable-model-invocation: true
         self.assertEqual(meta["future"], ["one", "two"])
 
     def test_sandbox_keeps_snapshot_readable_under_private_tmp(self):
-        stage = Path("/tmp/bender-data/local/skill-run-example")
+        stage = Path("/tmp/bender-data/local/skill-run-example").resolve()
         argv = sandbox.wrap("python report.py", info={"kind": "bwrap", "path": "/usr/bin/bwrap"},
                             work_dir=Path("/tmp/bender-data/work"), allow_net=False, read_dirs=(stage,))
         binding = argv.index(str(stage)) - 1

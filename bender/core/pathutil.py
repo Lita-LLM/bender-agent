@@ -5,13 +5,23 @@ import ntpath
 import os
 from pathlib import Path, PurePosixPath
 import re
-import tempfile
 
 from .errors import HumanError
 
 _CASE = {}
 _UNICODE = {}
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$", re.I)
+
+
+def _probe_file(prefix, folder):
+    """Один отказ ACL не превращается в тысячи повторов tempfile на Windows."""
+    for _ in range(4):
+        name=Path(folder)/(prefix+os.urandom(8).hex())
+        try:
+            return os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL,0o600),str(name)
+        except FileExistsError:
+            continue
+    raise FileExistsError('Не удалось выбрать имя пробного файла')
 
 
 def safe_name(raw, *, portable=False):
@@ -62,7 +72,7 @@ def case_sensitive(path):
     probe = folder
     while True:
         try:
-            fd, name = tempfile.mkstemp(prefix=".bender-case-a", dir=probe)
+            fd, name = _probe_file('.bender-case-a',probe)
             os.close(fd)
             try:
                 alternate = str(Path(name).with_name(Path(name).name.upper()))
@@ -88,7 +98,7 @@ def unicode_equivalent(path):
     key = folder.stat().st_dev
     if key not in _UNICODE:
         try:
-            fd, name = tempfile.mkstemp(prefix=".bender-é-", dir=folder)
+            fd, name = _probe_file('.bender-é-',folder)
             os.close(fd)
             try:
                 alternate = unicodedata.normalize("NFD", name)

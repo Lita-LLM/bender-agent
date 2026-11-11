@@ -79,6 +79,8 @@ class Chrome:
         self.loop = None
 
     async def start(self):
+        if os.name!='posix':
+            raise HumanError('browser_platform','Этот канал браузера пока недоступен в Windows','Используй внешний браузерный MCP; встроенный канал пока проверен только на POSIX.')
         import fcntl
         self.loop = asyncio.get_running_loop()
         self.profile.mkdir(parents=True, exist_ok=True)

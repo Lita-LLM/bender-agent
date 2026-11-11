@@ -50,7 +50,7 @@ def log_rows(root,limit):
     except OSError:return [{'kind':'unavailable'}]
     out=[]
     for line in lines:
-        frame=re.search(r'File "[^"\n]*?(bender/[a-zA-Z0-9_/.-]+\.py)", line (\d+)',line)
+        frame=re.search(r'File "[^"\n]*?(bender/[a-zA-Z0-9_/.-]+\.py)", line (\d+)',line.replace('\\','/'))
         if frame:
             try:
                 module=str(relative_path(frame[1]))

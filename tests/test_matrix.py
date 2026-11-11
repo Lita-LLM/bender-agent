@@ -102,7 +102,7 @@ class MatrixTest(TempDirCase):
                 sync=next(req for name,req in self.calls if name=='sync');self.assertEqual(sync.q('timeout'),'60000')
                 self.assertEqual(json.loads(sync.q('filter'))['room']['rooms'],[ROOM])
                 self.assertNotIn('PRIVATE_MATRIX_TOKEN',json.dumps(self.app.settings.group('matrix')))
-                self.assertEqual(self.app.dirs.secrets.stat().st_mode&0o777,0o600)
+                if os.name=='posix':self.assertEqual(self.app.dirs.secrets.stat().st_mode&0o777,0o600)
             finally:await self.shutdown()
 
     @async_test

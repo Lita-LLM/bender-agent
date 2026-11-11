@@ -287,12 +287,14 @@ async def try_agy(app, rest, term) -> int:
     term.line(f"  программа: {command}")
     term.line(f"  версия:    {(await ask('--version')).strip()[:80] or '?'}")
     helptext = await ask("--help")
-    flags = {name: name in helptext for name in ("-p", "--print", "stream-json", "--output-format", "--resume", "mcp", "--allowedTools", "--disallowedTools")}
+    import re
+    known = set(re.findall(r'--[a-zA-Z][a-zA-Z0-9-]*', helptext))
+    flags = {name: name in known for name in ('--print', '--input-format', '--output-format', '--mode', '--model', '--effort')}
     term.line("  флаги:     " + ", ".join(f"{k} {'есть' if v else 'нет'}" for k, v in flags.items()))
-    can_wrap = flags["stream-json"] and (flags["-p"] or flags["--print"])
+    can_wrap = all(flags[name] for name in ('--print', '--input-format', '--output-format', '--mode'))
     term.line("  движок:    " + (term.green("неинтерактивный режим с потоком событий есть") if can_wrap else term.amber("потока событий не видно — встроить нельзя")))
-    term.line(term.amber("  ⚠ Google не поддерживает обёртки agy в сторонних приложениях на личных планах и может заблокировать аккаунт. Бендер движок не включает."))
-    term.line(term.dim("  Встроенные инструменты agy: проверь вручную, что их можно запретить (иначе Предохранитель не удержит агента)."))
+    term.line(term.amber("  ⚠ Подключение требует принятия риска: Google может ограничить аккаунт."))
+    term.line(term.dim("  Режим plan и инструкция не гарантируют запрета встроенных тулов agy. Тулы Бендера проходят через Предохранитель."))
     return 0 if can_wrap else 1
 
 

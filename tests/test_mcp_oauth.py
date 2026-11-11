@@ -1,4 +1,5 @@
 """Векторы PKCE, discovery, challenge и точная проверка издателя OAuth."""
+import os
 import unittest
 import asyncio
 import ssl
@@ -185,7 +186,7 @@ class OAuthFlowTest(TempDirCase):
                 stored=self.app.settings.group('mcp_oauth');self.assertEqual(stored['servers']['remote']['issuer'],self.base+'/issuer')
                 raw=str(stored)+str(self.app.settings.group('mcp'))
                 self.assertNotIn('test-access-1',raw);self.assertNotIn('test-refresh-1',raw)
-                self.assertEqual(self.app.dirs.secrets.stat().st_mode&0o777,0o600)
+                if os.name=='posix':self.assertEqual(self.app.dirs.secrets.stat().st_mode&0o777,0o600)
                 server=self.app.mcp.get('remote');value,_=self.app.guard.expand_secrets(server['headers']['Authorization'],host='127.0.0.1',tool='mcp:remote')
                 self.assertEqual(value,'Bearer test-access-1')
                 self.assertNotIn('test-access-1',self.app.guard.scrub('test-access-1'))

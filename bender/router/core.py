@@ -368,7 +368,7 @@ class Switchboard:
             try:
                 return await run_agy(self,cand,messages,tools,params,relay)
             except (ValueError,TypeError,AttributeError,KeyError,IndexError,RecursionError) as exc:
-                raise ProviderError('protocol',provider=p.get('name','agy'),model=cand.model,message='agy прислал некорректное событие',raw=type(exc).__name__) from None
+                raise ProviderError('protocol',provider=p.get('name','agy'),model=cand.model,message='agy прислал некорректное событие',raw=type(exc).__name__,partial={'actions':True}) from None
         ad = adapter_for(p)
         proto = self.protocol(cand, tools, params)
         params = {k: v for k, v in params.items() if k != "tool_protocol"}

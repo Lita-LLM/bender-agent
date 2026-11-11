@@ -122,6 +122,12 @@ class ImportTest(ImportCase):
         ids = {i.id for i in plan.items}
         # AGENTS.md в образце — нетронутая заготовка OpenClaw (хэш совпадает) — её не тащим
         self.assertNotIn("self:agents-ref", ids)
+        template=self.src/'workspace'/'AGENTS.md'
+        raw=template.read_bytes().replace(b'\r\n',b'\n')
+        template.write_bytes(raw.replace(b'\n',b'\r\n'))
+        self.assertNotIn('self:agents-ref',{i.id for i in self.plan().items})
+        template.write_bytes(raw+b'\nOwner-specific instruction.\n')
+        self.assertIn('self:agents-ref',{i.id for i in self.plan().items})
         self.assertIn("self:SOUL.md", ids)
         self.assertEqual(plan.agent.id, "tin")
         self.assertEqual(plan.install.version, "2026.10.5")

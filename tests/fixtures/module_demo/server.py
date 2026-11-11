@@ -1,6 +1,8 @@
 """Модуль-пример: echo через stdio MCP, без доступа к объектам Бендера."""
 import json
 import sys
+sys.stdin.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8')
 
 for line in sys.stdin:
     message = json.loads(line)

@@ -1,5 +1,6 @@
 """Браузер агента (превью): настоящий Chromium по каналу DevTools, если он есть в системе."""
 import threading
+import os
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -40,7 +41,7 @@ class BrowserTest(TempDirCase):
                 self.assertFalse(result.ok, url)
                 self.assertIn('http(s)', result.content)
 
-    @unittest.skipUnless(find_browser(), 'нет Chrome/Chromium')
+    @unittest.skipUnless(os.name=='posix' and find_browser(), 'Нужен POSIX-канал DevTools и Chrome/Chromium; Windows-канал ещё не реализован')
     @async_test
     async def test_real_page_click_type_and_untrusted_wrapper(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)

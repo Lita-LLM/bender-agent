@@ -1,4 +1,5 @@
 """Необязательный процесс: хеши, границы установки, HTTP, роли и запасной путь."""
+import os
 import asyncio
 import hashlib
 import http.client
@@ -69,7 +70,7 @@ class LocalVoiceTest(TempDirCase):
         cli.set('voice-key','voice-token')
         self.assertEqual(running.get('voice-key'),'voice-token')
         self.assertEqual(cli.get('second'),'other-key')
-        self.assertEqual(path.stat().st_mode&0o777,0o600)
+        if os.name=='posix':self.assertEqual(path.stat().st_mode&0o777,0o600)
 
     def test_download_hash_failure_keeps_old_file_and_removes_partial(self):
         target=self.tmp/'model.onnx';target.write_bytes(b'previous')
@@ -102,7 +103,7 @@ class LocalVoiceTest(TempDirCase):
             for kind,data in manifest['models'].items():
                 self.assertEqual(data['revision'],'a'*40)
                 for item in data['files']:self.assertEqual(hashlib.sha256((folder/'models'/kind/item['local']).read_bytes()).hexdigest(),item['hash'])
-            self.assertEqual((folder/'token').stat().st_mode&0o777,0o600)
+            if os.name=='posix':self.assertEqual((folder/'token').stat().st_mode&0o777,0o600)
             self.assertIn('soundfile==0.13.1',str(command.call_args_list))
             self.assertTrue((folder/'bender-voice.service').is_file())
             app.settings.set('guard',{'enabled':False})

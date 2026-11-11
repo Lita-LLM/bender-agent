@@ -4,6 +4,8 @@ import json
 import re
 import sys
 import uuid
+sys.stdin.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8')
 from urllib.error import HTTPError
 from urllib.parse import quote,urlencode,urlsplit
 from urllib.request import Request,HTTPRedirectHandler,build_opener

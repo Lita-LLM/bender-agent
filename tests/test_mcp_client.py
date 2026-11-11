@@ -70,7 +70,7 @@ class McpClientTest(TempDirCase):
             self.assertIn("[секрет скрыт]", result.content)
             self.assertEqual(progress, ["Проверка идёт"])
             self.assertNotIn("тестовый-секрет", json.dumps(self.app.settings.group("mcp"), ensure_ascii=False))
-            self.assertEqual(self.app.dirs.secrets.stat().st_mode & 0o777, 0o600)
+            if os.name=='posix':self.assertEqual(self.app.dirs.secrets.stat().st_mode & 0o777, 0o600)
         finally:
             await self.app.close()
 

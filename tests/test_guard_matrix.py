@@ -3,6 +3,7 @@
 отказ называет слой и действующую политику."""
 import itertools
 from pathlib import Path
+from unittest.mock import patch
 
 from bender.guard.policy import Action
 from bender.mind.passport import snapshot
@@ -55,6 +56,11 @@ class GuardMatrixTest(TempDirCase):
 
     @async_test
     async def test_hardline_holds_when_off_and_only_hardline_switch_lifts_it(self):
+        # В Windows TEMP лежит внутри настоящего дома: тогда раньше сработает sealed.
+        # Для проверки отдельного слоя hardline дом и данные должны быть соседями.
+        home=self.tmp/'isolated-home'
+        home_patch=patch('bender.guard.policy.HOME',home)
+        home_patch.start();self.addCleanup(home_patch.stop)
         async with MindEnv(self.tmp) as env:
             host = env.app
             ran = []
@@ -68,11 +74,11 @@ class GuardMatrixTest(TempDirCase):
             host.tools.run = no_exec
             for enabled in (False, True):
                 host.settings.set("guard", {"enabled": enabled, "profile": "off"})
-                for cap, target in (("exec", "rm -rf /"), ("fs.delete", str(Path.home())), ("fs.delete", "/etc")):
+                for cap, target in (("exec", "rm -rf /"), ("fs.delete", str(home)), ("fs.delete", str(Path('/etc').resolve()))):
                     d = await host.guard.check(act(cap, target), session_id="s")
                     self.assertEqual((d.verdict, d.rule), ("deny", "hardline"), (enabled, cap, target))
                 host.settings.set("guard", {"hardline": False})
-                d = await host.guard.check(act("fs.delete", str(Path.home())), session_id="s")
+                d = await host.guard.check(act("fs.delete", str(home)), session_id="s")
                 self.assertEqual(d.rule, "off", "жёсткий список выключается только своим переключателем")
                 host.settings.set("guard", {"hardline": True})
             # обычное удаление в рабочей папке при выключенном — разрешено

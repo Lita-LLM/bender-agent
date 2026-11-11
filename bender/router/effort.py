@@ -122,6 +122,7 @@ def profile(provider, model, mode='auto'):
                 mode='cli';between=False
                 if re.match(r'claude-opus-4-5(?:-|$)',name):levels=['low','medium','high']
                 levels=[] if unsupported else [x for x in levels if x not in ('off','minimal','adaptive')]
+        elif kind=='antigravity':mode='cli';levels=['low','medium','high','xhigh','max']
         elif kind=='chatgpt':mode='openai';levels=_openai(model,True)
         elif host=='openrouter.ai' or preset=='openrouter':
             mode='openrouter';levels=['off','minimal','low','medium','high','xhigh','adaptive']
@@ -156,6 +157,7 @@ def profile(provider, model, mode='auto'):
     if not automatic and mode=='openai':note='Явный формат: выбранный уровень передаётся напрямую. Допустимые уровни проверь у своего посредника.'
     if automatic and preset=='ollama':note='Ollama переводит reasoning_effort по метаданным модели; уровни могут совпадать или возвращаться к её умолчанию. Поддержку проверь в /api/show.'
     if between:note+=' off оставляет служебные размышления между тулами (between_tools); полного disabled у этой модели нет.'
+    if kind=='antigravity':note='Antigravity: --effort; фактическую поддержку уровня проверяет установленный agy.'
     return {'mode':mode,'levels':['default']+levels,'between_tools':between,'note':note}
 
 

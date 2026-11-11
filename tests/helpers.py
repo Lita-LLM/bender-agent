@@ -13,6 +13,8 @@ from pathlib import Path
 for _k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
 os.environ["BENDER_NO_ANIM"] = "1"
+# Подпроцессы фальшивых CLI читают/пишут UTF-8 протокола, включая Windows с cp1251.
+os.environ['PYTHONUTF8'] = '1'
 
 WEB_TOKEN = 'bender-test-owner-token-0123456789abcdef'
 
@@ -43,6 +45,9 @@ class TempDirCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="bender-test-")
         self.tmp = Path(self._tmp.name)
+        # unittest выполняет cleanup в обратном порядке: сначала базы/процессы,
+        # зарегистрированные тестом, затем папку (Windows не удаляет открытые файлы).
+        self.addCleanup(self._tmp.cleanup)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        super().tearDown()

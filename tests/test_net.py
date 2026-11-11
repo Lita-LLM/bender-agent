@@ -105,7 +105,7 @@ class NetTest(unittest.TestCase):
             await client.close()
             await server.stop()
         with self.assertRaises(NetError) as cm:
-            await HttpClient(timeouts=Timeouts(connect=2)).get(f"http://127.0.0.1:{server.port}/hello")
+            await HttpClient(timeouts=Timeouts(connect=5)).get(f"http://127.0.0.1:{server.port}/hello")
         self.assertEqual(cm.exception.kind, "connect")
 
     @async_test

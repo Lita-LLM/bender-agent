@@ -712,9 +712,10 @@ class Planner:
         from .sourceguard import check
         check(self.app,p,self.ws)
         raw = p.read_bytes()
-        if sha256_bytes(raw) in self.template_hashes.get(name, set()):
+        known=self.template_hashes.get(name, set())
+        if sha256_bytes(raw) in known or sha256_bytes(raw.replace(b'\r\n',b'\n')) in known:
             return None  # заготовка OpenClaw, никто не трогал
-        text = raw.decode("utf-8", errors="replace")
+        text = raw.decode("utf-8", errors="replace").replace('\r\n','\n')
         return text if meaningful(text) else None
 
     def self_item(self, iid: str, title: str, target: str, text: str, *, note: str = "") -> None:

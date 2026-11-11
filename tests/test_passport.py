@@ -39,7 +39,11 @@ class PassportTest(TempDirCase):
             candidate = app.router.chain('main')[0]
             first = brief(app, turn, candidate)
             self.assertIs(first, brief(app, turn, candidate))
-            self.assertLess(estimate_tokens(first), 550)
+            # Длина пути TEMP зависит от ОС/имени пользователя; измеряем сам паспорт.
+            budgeted=first
+            for folder in sorted(snapshot(app)['folders'].values(),key=len,reverse=True):
+                budgeted=budgeted.replace(folder,'/fixture')
+            self.assertLess(estimate_tokens(budgeted), 550)
             self.assertIn('без таблиц и заголовков', first)
             self.assertIn('полный markdown', brief(app, Turn(env.sid, 'pult'), candidate))
             self.assertIn('простой текст', brief(app, Turn(env.sid, 'terminal'), candidate))

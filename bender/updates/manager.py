@@ -204,11 +204,11 @@ class Versions:
             base=Path(temp)
             git=["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-c","protocol.file.allow=never"]
             argv=git+["clone","--depth","1","--no-checkout","--no-recurse-submodules"]+(["--branch",ref] if ref else [])+["--",url,str(base/"repo")]
-            result=await self.app.tools.run("run",{"command":shlex.join(argv),"allow_net":True},ctx)
+            result=await self.app.tools.run("run",{"command":shlex.join(argv),"argv":argv,"allow_net":True},ctx)
             if not result.ok: raise error("Git не получил версию",result.content)
             # git archive не запускает фильтры checkout и код репозитория.
             argv=git+["-C",str(base/"repo"),"archive","--format=zip","--output="+str(base/"source.zip"),"HEAD","bender","tests"]
-            result=await self.app.tools.run("run",{"command":shlex.join(argv),"allow_net":False},ctx)
+            result=await self.app.tools.run("run",{"command":shlex.join(argv),"argv":argv,"allow_net":False},ctx)
             if not result.ok: raise error("Git не создал архив",result.content)
             if (base/"source.zip").stat().st_size>MAX_BYTES:
                 raise error("Git-пакет слишком большой")

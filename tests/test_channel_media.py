@@ -67,7 +67,7 @@ class MediaTest(TempDirCase):
             messages += [{'location':{'latitude':1,'longitude':2}},{'contact':{'phone_number':'+123','first_name':'Тест'}}]
             items=await env.app.telegram.receive_media(env.app,messages,env.sid)
             self.assertEqual(len(items),10)
-            self.assertTrue(all(Path(i['path']).is_file() and '/inbox/' in i['path'] for i in items))
+            self.assertTrue(all(Path(i['path']).is_file() and '/inbox/' in Path(i['path']).as_posix() for i in items))
             read=await env.app.tools.run('read_file',{'path':items[1]['path']},ToolContext(env.app,session_id=env.sid))
             self.assertTrue(read.ok);self.assertTrue(read.tainted)
             image=media.content('Посмотри',items)

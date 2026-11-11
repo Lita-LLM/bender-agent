@@ -125,7 +125,7 @@ class McpImagesTest(TempDirCase):
             sent = json.dumps(env.fake.state.requests[-1]["body"]["messages"], ensure_ascii=False)
             self.assertNotIn("image_url", sent)
             self.assertNotIn(DATA, sent)
-            self.assertIn(str(path), sent)
+            self.assertIn(json.dumps(str(path),ensure_ascii=False)[1:-1], sent)
 
     @async_test
     async def test_turn_limit_is_shared_with_read_file(self):

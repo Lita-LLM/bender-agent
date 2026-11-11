@@ -21,7 +21,8 @@ async def list_models(http: HttpClient, provider: dict, key: str | None) -> list
 
         return [dict(m, subscription=True) for m in MODELS]  # у подписки нет /models — свой список
     if provider.get("kind") == "antigravity":
-        return [{"id": "default", "subscription": True, "note": "какую выбрал сам agy"}]
+        from .agy import list_models as agy_models
+        return await agy_models(provider)
     if provider.get("kind") == "claude_code":
         from .cli import MODELS as CC
 

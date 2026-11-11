@@ -11,9 +11,15 @@ from tests.helpers import TempDirCase
 
 
 class PathsTest(TempDirCase):
+    def test_probe_permission_error_is_not_retried(self):
+        from bender.core.pathutil import _probe_file
+        with patch('bender.core.pathutil.os.open',side_effect=PermissionError('отказ ACL')) as opening:
+            with self.assertRaises(PermissionError):_probe_file('.bender-test-',self.tmp)
+        self.assertEqual(opening.call_count,1)
+
     def test_real_volume_probe_cached_and_no_prefix_confusion(self):
         self.assertIsInstance(case_sensitive(self.tmp), bool)
-        with patch('bender.core.pathutil.tempfile.mkstemp', side_effect=AssertionError('повторная запись')):
+        with patch('bender.core.pathutil._probe_file', side_effect=AssertionError('повторная запись')):
             case_sensitive(self.tmp)
         self.assertTrue(within(self.tmp / 'work' / 'new', self.tmp / 'work'))
         self.assertFalse(within(self.tmp / 'work-other', self.tmp / 'work'))

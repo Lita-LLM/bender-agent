@@ -22,6 +22,10 @@ class SandboxTest(TempDirCase):
         self.app.guard.grant("sandbox", [("exec", "*"), ("skill.run", "*"), ("mcp.call", "*")])
         self.ctx = ToolContext(self.app, session_id="sandbox")
 
+    def tearDown(self):
+        asyncio.run(self.app.close())
+        super().tearDown()
+
     async def execute(self, code, *, info=None, allow_net=False):
         info = info or sandbox.for_app(self.app)
         command = shlex.join([sys.executable, "-c", code])
@@ -117,6 +121,7 @@ class SandboxTest(TempDirCase):
             await self.app.close()
 
     def test_process_limit_set_where_it_counts(self):
+        if os.name!='posix':self.skipTest('Проверка POSIX unshare/RLIMIT_NPROC')
         work = self.tmp / "work"
         work.mkdir()
         limits = {"RLIMIT_NPROC": 16}

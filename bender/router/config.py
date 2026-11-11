@@ -37,7 +37,7 @@ PRESETS = {
     "chatgpt": {"name": "ChatGPT (подписка)", "kind": "chatgpt", "base_url": "https://chatgpt.com/backend-api/codex", "oauth": True},
     "claude_code": {"name": "Claude Code (на этой машине)", "kind": "claude_code", "subscription": True},
     "antigravity": {"name": "Antigravity (agy, превью, риск блокировки)", "kind": "antigravity", "subscription": True,
-                    "note": "Только текст и роли без тулов. Google не поддерживает обёртки agy на личных планах и может заблокировать аккаунт: при подключении нужно подтвердить риск."},
+                    "note": "Текст, поток, тулы Бендера текстовым протоколом. Встроенные тулы agy ограничены режимом plan и инструкцией, без гарантии изоляции; подключение требует принятия риска."},
     "codex_cli": {"name": "Codex CLI (пока недоступен как движок)", "kind": "codex_cli", "blocked": True},
     "openrouter": {"name": "OpenRouter", "kind": "openai", "base_url": "https://openrouter.ai/api/v1"},
     "openai": {"name": "OpenAI", "kind": "openai", "base_url": "https://api.openai.com/v1"},

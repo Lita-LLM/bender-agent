@@ -49,7 +49,11 @@ def scan(root, max_files, max_bytes, required="SKILL.md"):
                 entries += 1
                 if entries > max_files * 4:
                     raise error("Слишком много файлов и папок в навыке")
-                info = item.stat(follow_symlinks=False)
+                # DirEntry.stat в Windows возвращает st_nlink/st_ino/st_dev = 0.
+                # os.stat получает настоящие значения, не снимая запрет жёстких ссылок.
+                info = os.stat(item.path, follow_symlinks=False) if os.name=='nt' else item.stat(follow_symlinks=False)
+                if os.name=='nt' and getattr(info,'st_file_attributes',0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise error('В пакете найдена ссылка Windows',item.name)
                 if stat.S_ISLNK(info.st_mode):
                     raise error("В навыке найдена символическая ссылка", "Импортируй обычные файлы: " + item.name)
                 if stat.S_ISDIR(info.st_mode):

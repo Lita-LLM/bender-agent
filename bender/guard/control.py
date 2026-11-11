@@ -16,17 +16,26 @@ def updates_command(action):
     text = action.target.replace('"', '').replace("'", '')
     if re.search(r'\bbender\b[^\n;&|]*\bupdate\b', text): return True
     if not re.search(r'\bgit\b[^\n]*(?:\bpull\b|\bmerge\b|\breset\b|\brebase\b|\bcheckout\b|\bswitch\b|\bupdate-ref\b)', text): return False
-    cwd = action.detail.get('cwd')
-    try:
-        args = shlex.split(action.target)
-        if '-C' in args: cwd = Path(cwd or Path.cwd()) / args[args.index('-C') + 1]
-        if cwd:
-            start = path = canonical(cwd)
-            while not (path / '.git').exists() and path.parent != path: path = path.parent
-            if not (path / '.git').exists(): path = start  # программа без .git: сверяем саму папку
-            return any(same(path, root) for root in source_roots())
-    except (ValueError, IndexError): pass
-    return any(str(root) in text for root in source_roots())
+    variants = []
+    # Нативная команда Windows сохраняет обратные слеши; argv тула
+    # записан через POSIX shlex.join. Проверяем оба представления.
+    for posix in ((True,False) if os.name=='nt' else (True,)):
+        try:
+            variants.append([a[1:-1] if not posix and len(a)>=2 and a[0]==a[-1] and a[0] in ('"',"'") else a
+                             for a in shlex.split(action.target,posix=posix)])
+        except ValueError:pass
+    for args in variants:
+        try:
+            cwd = action.detail.get('cwd')
+            if '-C' in args: cwd = Path(cwd or Path.cwd()) / args[args.index('-C') + 1]
+            if cwd:
+                start = path = canonical(cwd)
+                while not (path / '.git').exists() and path.parent != path: path = path.parent
+                if not (path / '.git').exists(): path = start  # программа без .git: сверяем саму папку
+                if any(same(path, root) for root in source_roots()):return True
+        except (ValueError, IndexError): pass
+    return any(Path(arg).is_absolute() and within(arg,root)
+               for args in variants for arg in args for root in source_roots())
 
 
 def source_roots():

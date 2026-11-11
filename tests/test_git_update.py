@@ -339,7 +339,14 @@ class GitUpdateTest(TempDirCase):
             helper.chmod(0o700)
             self.git(self.clone, 'config', 'credential.helper', '!gh auth git-credential')
             service = self.tmp / 'service-bin'; service.mkdir()
-            (service / 'git').symlink_to(shutil.which('git'))
+            if os.name=='nt':
+                import shlex
+                # Git for Windows запускает credential helper своей sh; Python — явно.
+                script=helper.with_suffix('.py');script.write_bytes(helper.read_bytes())
+                helper.write_text('#!/bin/sh\nexec '+shlex.quote(Path(sys.executable).as_posix())+' '+shlex.quote(script.as_posix())+' "$@"\n')
+                service=Path(shutil.which('git')).parent
+            else:
+                (service / 'git').symlink_to(shutil.which('git'))
             with patch('pathlib.Path.home', return_value=home), patch.dict(os.environ, {'PATH': str(service)}):
                 plan = await app.updater.check()
                 self.assertTrue(helper_log.exists())

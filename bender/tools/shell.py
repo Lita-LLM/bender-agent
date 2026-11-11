@@ -21,9 +21,16 @@ def _clip(text: str, limit: int = 30_000) -> str:
     return head + f"\n…[пропущено {len(text) - limit} символов]…\n" + tail
 
 
-async def start_command(ctx, command, cwd="", allow_net=False):
+async def start_command(ctx, command, cwd="", allow_net=False, argv=None):
     """Общий запуск коротких и фоновых команд; Prepared живёт до завершения процесса."""
     agent_ctx = ctx.app
+    if argv is not None:
+        from ..core.errors import HumanError
+        import shlex
+        if not isinstance(argv, list) or not argv or len(argv)>256 or any(not isinstance(a,str) or '\0' in a for a in argv) or not argv[0]:
+            raise HumanError('command_argv','Неверные аргументы команды','Передай непустой список строк без нулевых символов.')
+        argv=list(argv)
+        command=shlex.join(argv)  # Для Предохранителя и журнала; оболочка эту строку не исполняет.
     info = sandbox.for_app(agent_ctx, owner=ctx.actor=='owner')
     workdir = agent_ctx.guard.policy.resolve(cwd) if cwd else agent_ctx.dirs.work
     if cwd:
@@ -34,9 +41,18 @@ async def start_command(ctx, command, cwd="", allow_net=False):
         from ..core.errors import HumanError
 
         raise HumanError("process_off", "Фоновые команды выключены во время одобрения", "Повтори запуск после включения.")
-    expanded, used = agent_ctx.guard.expand_secrets(command, tool="run", session_id=ctx.session_id)
+    if argv is None:
+        expanded, used = agent_ctx.guard.expand_secrets(command, tool="run", session_id=ctx.session_id)
+    else:
+        import shlex
+        values=[agent_ctx.guard.expand_secrets(a,tool='run',session_id=ctx.session_id) for a in argv]
+        argv=[value for value,_ in values]
+        used=sorted({secret for _,names in values for secret in names})
+        expanded=shlex.join(argv)
     prepared = sandbox.prepare(expanded, info=info, work_dir=agent_ctx.dirs.work, cwd=workdir,
-                               allow_net=allow_net, temp_root=agent_ctx.dirs.local)
+                               allow_net=allow_net, temp_root=agent_ctx.dirs.local, raw_argv=argv)
+    if os.name=='nt' and argv and not info.get('windows_job'):
+        prepared.argv=argv
     env = {**os.environ, **prepared.env, "PAGER": "cat", "GIT_PAGER": "cat"}
     kw = {"stdin": asyncio.subprocess.DEVNULL, "stdout": asyncio.subprocess.PIPE,
           "stderr": asyncio.subprocess.STDOUT, "cwd": str(workdir), "env": env}
@@ -53,16 +69,21 @@ async def start_command(ctx, command, cwd="", allow_net=False):
 
 def register(reg) -> None:
     @reg.tool("run", "Выполнить команду", group="shell")
-    async def run(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "", allow_net: bool = False) -> ToolResult:
+    async def run(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "", allow_net: bool = False, argv: list[str] = None) -> ToolResult:
         """Короткая команда с ожиданием кода выхода и stdout/stderr; долгая фоновая — process_start. Файлы читай/правь отдельными тулами.
 
         command — команда
         timeout — секунд до принудительной остановки (до 1800)
         cwd — рабочая папка (по умолчанию рабочая папка агента)
         allow_net — нужна ли команде сеть (в песочнице сеть по умолчанию закрыта; ssh, git с сервером, curl — true)
+        argv — отдельные аргументы программы вместо command; без подстановок оболочки, пути Windows сохраняются
         """
         agent_ctx = ctx.app
-        proc, prepared, used, workdir, info = await start_command(ctx, command, cwd, allow_net)
+        if argv is not None:
+            import shlex
+            # Валидацию делает start_command до проверки и запуска.
+            if isinstance(argv,list) and all(isinstance(a,str) for a in argv):command=shlex.join(argv)
+        proc, prepared, used, workdir, info = await start_command(ctx, command, cwd, allow_net, argv)
         timeout = max(1, min(int(timeout), 1800))
         chunks: list[bytes] = []
         total = 0

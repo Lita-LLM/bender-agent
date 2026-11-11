@@ -1,99 +1,177 @@
-"""Движок Antigravity (`agy -p`), превью, только текст, без тулов Бендера. Выключен, пока хозяин не принял риск.
+"""Официальный agy: протокол рабочего agy-facade, один процесс на запрос.
 
-Google не поддерживает обёртки agy в сторонних приложениях на личных планах и может заблокировать аккаунт
-(docs/research/ANTIGRAVITY.md). Поэтому движок осторожный:
-- встроенные инструменты agy обязаны быть выключены: если в `agy --help` нет флага, который это делает, ход отказывается;
-- тулы Бендера не передаются (петлевого MCP нет): годится ролям без тулов (Быстрая, Чтец, Сновидец и т. п.);
-- историю уносит стенограммой, сессия agy не сохраняется; чужих настроек и памяти agy в ход не попадает.
-Протокол stream-json разобран по документации и не проверялся на настоящем бинарнике."""
+Plan и инструкция не использовать встроенные тулы не являются изоляцией.
+Тулы Бендера возвращаются текстом и исполняются через Предохранитель.
+"""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 from pathlib import Path
 
-from .cli_common import classify, command, flags, stream
+from .cli_common import classify, command, flags, probe, _spawn
 from .errors import ProviderError
 from .types import Result, Usage
+from . import textproto
 
-MODELS = ["default"]
-# Флаги, которыми agy лишается своих инструментов, в порядке предпочтения: (флаг, аргументы)
-DISABLERS = (("--no-tools", []), ("--tools", [""]), ("--allowedTools", [""]), ("--allowed-tools", [""]))
-RISK = ("Google не поддерживает обёртки agy в сторонних приложениях на личных планах и может заблокировать аккаунт. "
-        "Подключай только если принимаешь этот риск сам: подтверди при подключении.")
-
-
-def disabler(known):
-    for flag, args in DISABLERS:
-        if flag in known:
-            return [flag, *args]
-    return None
+MODELS = ['default']
+RISK = ('Google может ограничить аккаунт при использовании Antigravity сторонним приложением. '
+        'Режим plan и просьба не вызывать встроенные инструменты не гарантируют их запрета: '
+        'они могут пройти мимо Предохранителя. Подключай только если принимаешь этот риск сам.')
 
 
-def text_of(event) -> str:
-    """Текст из события потока: форматы agy по документации разные, берём самые вероятные."""
-    if not isinstance(event, dict):
-        return ""
-    message = event.get("message")
-    if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "".join(str(b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type", "text") == "text")
-    for key in ("text", "content", "delta"):
-        if isinstance(event.get(key), str):
-            return event[key]
-    return ""
+async def list_models(provider):
+    """Список из самого agy, без выдуманных моделей и запросов к модели."""
+    code, output = await probe(command(provider, 'agy') + ['models'], timeout=60)
+    rows = []
+    if not code:
+        for line in output.splitlines():
+            fields = line.split('\t', 1)
+            name = fields[0].strip()
+            if name.startswith(('gemini-', 'claude-', 'gpt-')) and not any(c.isspace() for c in name):
+                rows.append({'id': name, 'name': fields[-1].strip(), 'subscription': True})
+    if not rows:
+        raise ProviderError(classify(output), provider=provider.get('name', 'Antigravity'),
+                            message='agy не вернул модели; открой agy и проверь вход.')
+    return rows
 
 
-async def run_agy(router, cand, messages: list[dict], tools, params: dict, relay) -> Result:
-    p = cand.provider
-    pname = p.get("name") or "Antigravity"
-    if tools:
-        raise ProviderError("format", provider=pname, model=cand.model,
-                            message="Antigravity работает без тулов Бендера: поставь его на роль без тулов (Быстрая, Чтец) или выбери другую главную модель.")
-    exe = command(p, "agy")
-    if not exe or not shutil.which(exe[0]):
-        raise ProviderError("not_found", provider=pname, model=cand.model, message=f"Не нашёл «{exe[0] if exe else 'agy'}». Поставь Antigravity CLI и войди в него.")
-    known = await flags(exe)
-    off = disabler(known)
-    if off is None or "--output-format" not in known:
-        raise ProviderError("format", provider=pname, model=cand.model,
-                            message="В agy не нашёл флаг, отключающий его встроенные инструменты (или поток stream-json). Без этого Бендер движок не запускает: проверь `bender try agy`.")
-    from .cli import stateless_prompt
-    system = next((m["content"] for m in messages if m.get("role") == "system" and isinstance(m.get("content"), str)), "")
-    prompt = (f"[Инструкция]\n{system}\n\n" if system else "") + stateless_prompt(messages, [])
-    args = exe + ["-p", "--output-format", "stream-json", *off]
-    if cand.model and cand.model.strip().lower() != "default":
-        args += ["--model", cand.model]
-    bridge = getattr(router, "cli_bridge", None)
-    cwd = (Path(bridge.app.dirs.local) if bridge is not None else Path.home() / ".bender-tmp") / "antigravity"
-    cwd.mkdir(parents=True, exist_ok=True)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("BENDER_")}
-    parts: list[str] = []
-    final = {}
-
-    def event(ev):
-        if not isinstance(ev, dict):
-            return
-        if ev.get("type") in ("result", "final", "done"):
-            final.update(ev)
-            return
-        chunk = text_of(ev)
-        if chunk:
-            parts.append(chunk)
-            relay("text", chunk)
+async def stream_facade(args, *, prompt, cwd, env, timeout, on_event, protection=None):
+    """JSON-ввод; stdin открыт до result, затем убираем процесс и потомков."""
+    proc, job = await _spawn(args, protection, cwd=str(cwd), env=env,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, limit=2*1024*1024, start_new_session=os.name != 'nt')
+    tail = bytearray()
+    async def read_err():
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                return
+            tail.extend(chunk)
+            del tail[:-8000]
+    async def consume():
+        request = {'event': 'user', 'message': {'role': 'user', 'content': prompt}}
+        proc.stdin.write((json.dumps(request, ensure_ascii=False) + '\n').encode('utf-8'))
+        await proc.stdin.drain()
+        total = 0
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                return -1
+            total += len(line)
+            if total > 16*1024*1024:
+                raise ValueError('agy прислал слишком много событий')
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict):
+                on_event(ev)
+                if ev.get('event') == 'result':
+                    return 0
+    reader = asyncio.create_task(read_err())
     try:
-        code, err = await stream(args, prompt=prompt, cwd=cwd, env=env, timeout=float(p.get("timeout") or 600), on_event=event)
+        code = await asyncio.wait_for(consume(), timeout)
+        return code, tail.decode('utf-8', 'replace')
+    finally:
+        if job:
+            job.close()
+        if proc.returncode is None:
+            from ..tools.shell import _kill
+            _kill(proc)
+        await proc.wait()
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def run_agy(router, cand, messages, tools, params, relay):
+    p = cand.provider
+    pname = p.get('name') or 'Antigravity'
+    def failure(kind, message, **kw):
+        return ProviderError(kind, provider=pname, model=cand.model, message=message, **kw)
+    if not p.get('risk_accepted'):
+        raise failure('format', RISK)
+    exe = command(p, 'agy')
+    if not exe or not shutil.which(exe[0]):
+        raise failure('not_found', 'Не найден agy. Установи Antigravity CLI и войди в него.')
+    bridge = getattr(router, 'cli_bridge', None)
+    extra = {}
+    if os.name == 'nt' and bridge is not None:
+        from ..guard.windows_job import parameters
+        extra['protection'] = parameters(bridge.app)
+    known = await flags(exe, **extra)
+    if not {'--input-format', '--output-format', '--mode'} <= known:
+        raise failure('format', 'agy не поддерживает нужный stream-json; обнови CLI.')
+    args = exe + ['--input-format', 'stream-json', '--output-format', 'stream-json', '-p=', '--mode', 'plan']
+    if '--disable-slash-commands' in known:
+        args.append('--disable-slash-commands')
+    if cand.model and cand.model != 'default':
+        args += ['--model', cand.model]
+    from .effort import describe
+    effort = describe(p, cand.model, params)['effective']
+    if effort != 'default':
+        if '--effort' not in known:
+            raise failure('format', 'Этот agy не поддерживает выбранное усилие; обнови CLI.')
+        args += ['--effort', effort]
+    from .agy_media import prepare, stream_acp
+    messages, media = prepare(messages)
+    encoded = textproto.encode(messages, tools) if tools else messages
+    prompt = ('API mode: never use built-in tools, inspect files or run commands. '
+              'Return only the next assistant message. Request Bender tools as text '
+              '<tool_call> JSON blocks; Bender executes them separately.\n\n')
+    # Вся история: сжатием и лимитами контекста управляет Бендер.
+    prompt += '\n\n'.join('[' + str(m.get('role', 'user')) + ']\n' + textproto._text(m.get('content')) for m in encoded)
+    cwd = (Path(bridge.app.dirs.local) if bridge else Path.home() / '.bender-tmp') / 'antigravity'
+    cwd.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('BENDER_')}
+    parts, final, usage = [], {}, {}
+    hider = textproto.Hider() if tools else None
+    def emit(chunk):
+        if not isinstance(chunk, str):
+            raise ValueError('agy прислал некорректный текст')
+        parts.append(chunk)
+        visible = hider.feed(chunk) if hider else chunk
+        if visible:
+            relay('text', visible)
+    def event(ev):
+        if ev.get('event') == 'result':
+            final.update(ev.get('result') or {})
+        elif ev.get('event') == 'step_update':
+            step = ev.get('step_update') or {}
+            usage.update(step.get('usage') or {})
+            if step.get('step_type') == 'agent_response' and step.get('text_delta'):
+                emit(step['text_delta'])
+    try:
+        if media:
+            code, err = await stream_acp(exe, prompt=prompt, media=media, model=cand.model, effort=effort,
+                cwd=cwd, env=env, timeout=float(p.get('timeout') or 600), on_event=event, **extra)
+        else:
+            code, err = await stream_facade(args, prompt=prompt, cwd=cwd, env=env,
+                timeout=float(p.get('timeout') or 600), on_event=event, **extra)
     except asyncio.TimeoutError:
-        raise ProviderError("timeout", provider=pname, model=cand.model, message="Antigravity молчит слишком долго") from None
-    answer = (final.get("result") if isinstance(final.get("result"), str) else text_of(final)) or "".join(parts)
-    if (code and not answer) or not answer.strip():
-        raise ProviderError(classify(f"{err}"), provider=pname, model=cand.model, message=(err or f"код выхода {code}")[-400:] or "пустой ответ", raw=err[-1500:])
-    res = Result(provider_id=p["id"], provider_name=pname, model=cand.model)
-    res.text = answer.strip()
-    res.usage = Usage(input=0, output=0)
-    res.finish = "stop"
-    return res
+        raise failure('timeout', 'Antigravity не ответил вовремя.', partial={'actions': True}) from None
+    except ProviderError as exc:
+        exc.partial = {'actions': True}
+        raise
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise failure('protocol', 'Сбой потока agy.', raw=type(exc).__name__, partial={'actions': True}) from None
+    if code or final.get('status') != 'SUCCESS':
+        error = str(final.get('error') or err or 'agy закрыл поток до результата')
+        raise failure(classify(error), error[-400:], partial={'actions': True})
+    if not parts and final.get('response'):
+        emit(final['response'])
+    if hider:
+        rest = hider.flush()
+        if rest:
+            relay('text', rest)
+    answer = ''.join(parts)
+    if not answer.strip():
+        raise failure('protocol', 'Antigravity вернул пустой ответ.', partial={'actions': True})
+    clean, calls = textproto.decode(answer) if tools else (answer.strip(), [])
+    usage.update(final.get('usage') or {})
+    return Result(text=clean, tool_calls=calls, provider_id=p['id'], provider_name=pname, model=cand.model,
+                  usage=Usage(input=int(usage.get('input_tokens') or 0), output=int(usage.get('output_tokens') or 0)),
+                  notice='Antigravity ACP не сообщил расход токенов; нулевые счётчики не означают бесплатный запрос.' if media and not usage else None,
+                  finish='tool_calls' if calls else 'length' if final.get('stop_reason') == 'max_tokens' else 'stop')

@@ -362,7 +362,7 @@ class FakeSpeakers(Speakers):
     def __init__(self):
         self.items, self.media, self.later, self.runtime, self.restarting = {}, Media(), {}, True, None
         self.app = type('App', (), {'bus': Bus()})()
-        self.ctx, self.reply, self.cfg = Ctx(self), '**Готово**, свет включён.', dict(CFG)
+        self.ctx, self.reply, self.cfg = Ctx(self), '**Готово**, свет включён.', dict(CFG,quiet_from=0,quiet_to=0)
         self.ctx.store.meta['speaker:session:kitchen'] = 'S1'
 
     def settings(self): return self.cfg

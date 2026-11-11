@@ -114,10 +114,10 @@ def make_plan(app, kind, path=None):
                 if visited > 512:
                     raise error("Слишком много папок проектных заметок", "Выбери одну папку проекта.")
                 dirs[:] = [d for d in dirs if not (Path(base)/d).is_symlink()]
-                notes += [str((Path(base)/f).relative_to(root)) for f in sorted(files) if f.endswith(".md")]
+                notes += [(Path(base)/f).relative_to(root).as_posix() for f in sorted(files) if f.endswith(".md")]
         memory = root / "memory"
         if memory.is_dir() and not memory.is_symlink():
-            notes += [str(p.relative_to(root)) for p in sorted(memory.glob("*.md"))]
+            notes += [p.relative_to(root).as_posix() for p in sorted(memory.glob("*.md"))]
     for rel in dict.fromkeys(notes):
         raw = read(app, root, rel)
         if raw and raw.strip():
@@ -216,7 +216,7 @@ def make_plan(app, kind, path=None):
                 if "SKILL.md" in files:
                     paths, _ = scan(Path(base), *app.skills.limits())
                     manifest = {rel: hashlib.sha256(bytes_from(p)).hexdigest() for rel,p in paths.items()}
-                    rel = str(Path(base).relative_to(root))
+                    rel = Path(base).relative_to(root).as_posix()
                     add("skill:"+rel, "skill", "Навык " + Path(base).name, {"path": rel, "manifest": manifest}, note="Только карантин. Просмотр и включение — в «Навыках».")
                     dirs[:] = []
     else:

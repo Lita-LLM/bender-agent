@@ -212,7 +212,7 @@ class Modules:
             commands = [git + ["clone", "--depth", "1", "--no-checkout", "--no-recurse-submodules"] + (["--branch", ref] if ref else []) + ["--", url, str(folder / "repo")],
                         git + ["-C", str(folder / "repo"), "archive", "--format=tar", "--output=" + str(folder / "package.tar"), tree]]
             for argv in commands:
-                result = await self.app.tools.run("run", {"command": shlex.join(argv), "cwd": str(folder), "allow_net": True}, ctx)
+                result = await self.app.tools.run("run", {"command": shlex.join(argv), "argv": argv, "cwd": str(folder), "allow_net": True}, ctx)
                 if not result.ok:
                     raise error("Не удалось получить модуль из git", result.content)
             return self.import_archive(folder / "package.tar")

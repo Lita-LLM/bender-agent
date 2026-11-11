@@ -5,6 +5,11 @@ KEYS=('vision','audio_input')
 
 
 def description(provider,model,key):
+    if provider.get('kind')=='antigravity' and key=='vision':
+        records=provider.get('model_capabilities') or {}
+        record=(records.get(model) or {}).get(key) if isinstance(records,dict) else None
+        if isinstance(record,dict) and isinstance(record.get('value'),bool):return dict(record)
+        return {'value':None,'source':'client','at':None,'reason':'Картинки передаются через ACP agy; поддержка выбранной моделью проверяется запросом.'}
     if provider.get('kind')=='claude_code' and key=='vision':
         return {'value':True,'source':'client','at':None,'reason':'Картинки уходят в Claude Code изображениями (stream-json).'}
     if provider.get('kind') in ('claude_code','codex_cli','antigravity'):

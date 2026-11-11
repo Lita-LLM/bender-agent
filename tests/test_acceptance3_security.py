@@ -25,7 +25,7 @@ class AcceptanceSecurityTest(TempDirCase):
         async with MindEnv(self.tmp) as env:
             home=self.tmp/'ssh-home';ssh=home/'.ssh';ssh.mkdir(parents=True)
             key=ssh/'id_test';key.write_text('ФАЛЬШИВЫЙ-КЛЮЧ');known=ssh/'known_hosts'
-            with patch.dict(os.environ,{'HOME':str(home)}),patch.object(sandbox,'detect',return_value={'kind':'bwrap','path':'/usr/bin/bwrap','fs':True,'net':True,'title':'тест'}):
+            with patch.object(Path,'home',return_value=home),patch.object(sandbox,'detect',return_value={'kind':'bwrap','path':'/usr/bin/bwrap','fs':True,'net':True,'title':'тест'}):
                 for link in ('symlink','hardlink'):
                     known.symlink_to(key) if link=='symlink' else os.link(key,known)
                     try:
@@ -60,7 +60,13 @@ else:
    for p in pathlib.Path(%r).iterdir():t.add(p,arcname=p.name)
 ''' % str(source));fake.chmod(0o700)
             owner=ToolContext(app,actor='owner',session_id='owner-install')
-            with patch.dict(os.environ,{'PATH':str(bindir)+os.pathsep+os.environ['PATH']}):
+            original_run=app.tools.run
+            async def run_fixture(name,args,ctx):
+                # Windows не исполняет shebang; запускаем тот же тестовый Git через Python.
+                if name=='run' and (args.get('argv') or [])[:1]==['git']:
+                    args={**args,'argv':[sys.executable,str(fake),*args['argv'][1:]]}
+                return await original_run(name,args,ctx)
+            with patch.dict(os.environ,{'PATH':str(bindir)+os.pathsep+os.environ['PATH']}), patch.object(app.tools,'run',run_fixture):
                 update=await app.versions.stage_git('https://example.invalid/program.git',owner)
                 self.assertEqual(update['files'],3)
                 module=await app.modules.import_git('https://example.invalid/module.git',owner)
@@ -149,6 +155,7 @@ for method,path in [('GET','state'),('POST','settings/guard')]:
     @async_test
     async def test_ssh_keys_readonly_hosts_writable_and_socket_survives_private_tmp(self):
         async with MindEnv(self.tmp) as env:
+            if sandbox.for_app(env.app)['kind']!='bwrap':self.skipTest('Нужен настоящий bubblewrap')
             app=env.app;home=self.tmp/'home';ssh=home/'.ssh';ssh.mkdir(parents=True)
             (ssh/'id_test').write_text('ФАЛЬШИВЫЙ-КЛЮЧ');(home/'.gnupg').mkdir();(home/'.gnupg/key').write_text('СКРЫТЬ')
             sock=self.tmp/'ssh-agent.sock'

@@ -67,7 +67,7 @@ class ReadFileMediaTest(TempDirCase):
             self.assertIn('image_url',json.dumps(env.fake.state.requests[-1]['body']))
             await app.mind.say(env.sid,'Третий ход')
             sent=json.dumps(env.fake.state.requests[-1]['body']['messages'],ensure_ascii=False)
-            self.assertNotIn('image_url',sent);self.assertIn(str(path),sent);self.assertIn('read_file',sent)
+            self.assertNotIn('image_url',sent);self.assertIn(json.dumps(str(path),ensure_ascii=False)[1:-1],sent);self.assertIn('read_file',sent)
             original=next(m for m in app.store.messages(env.sid) if m['meta'].get('tool_media'))
             self.assertEqual(original['content'][1]['data'],base64.b64encode(raw).decode())
             env.script([call('read_file',path=path.name),{'text':'Снова вижу.'}])

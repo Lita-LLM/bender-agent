@@ -32,6 +32,7 @@ class ProxyTest(TempDirCase):
 
     @async_test
     async def test_http_connect_dns_pin_and_rebinding(self):
+        if not hasattr(asyncio,'start_unix_server'):self.skipTest('Нужен Unix-сокет asyncio')
         app = App(self.tmp/'data')
         app.settings.set('workshop', {'network_proxy': True})
         observed, dialed = [], []

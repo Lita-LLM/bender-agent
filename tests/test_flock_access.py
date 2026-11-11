@@ -27,8 +27,9 @@ class FlockAccessTest(TempDirCase):
             self.assertTrue(listing.ok, listing.content)
             self.assertIn(app.dirs.root.name + '/', listing.content)
             found = await other.tools.run('find_files', {'pattern': '*.md', 'path': str(parent)}, ctx)
-            self.assertIn('agents/second/self/MEMORY.md', found.content, 'свою память видит')
-            self.assertNotIn(app.dirs.root.name + '/self/', found.content, 'чужую — нет')
+            found_paths=found.content.replace('\\','/')
+            self.assertIn('agents/second/self/MEMORY.md', found_paths, 'свою память видит')
+            self.assertNotIn(app.dirs.root.name + '/self/', found_paths, 'чужую — нет')
             grep = await other.tools.run('grep', {'pattern': 'тайна', 'path': str(parent)}, ctx)
             self.assertTrue(grep.ok, grep.content)
             self.assertNotIn('тайна главного', grep.content)
@@ -76,7 +77,8 @@ class FlockAccessTest(TempDirCase):
             listing = await helper.tools.run('mcp_diagnose', {}, ToolContext(helper, session_id='b'))
             self.assertIn('tg (stdio, общий для стаи): подключён', listing.content)
             # сервер упал — код выхода и ошибка видны
-            pool.process.kill()
+            from bender.tools.shell import _kill
+            _kill(pool.process)  # В Windows процесс работает в Job вместе с исполнителем.
             await pool.process.wait()
             failed = await helper.tools.run(tool_name('tg', 'echo'), {'text': 'три'}, ToolContext(helper, session_id='b'))
             self.assertFalse(failed.ok)
