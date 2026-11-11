@@ -72,6 +72,7 @@ def build_parser():
     update.add_argument('--check', action='store_true', help='только проверить новые коммиты')
     update.add_argument('--yes', action='store_true', help='установить показанные коммиты без вопроса')
     update.add_argument('--realign', action='store_true', help='после пересборки истории на сервере: привести клон к серверной ветке (прежний коммит сохранится в отдельной ветке)')
+    update.add_argument('--clean', action='store_true', help='чистая переустановка программы: правки и лишние файлы в папке программы стираются, данные (ключи, агенты, память) остаются; лечит «локальные правки» из-за перевода строк на Windows')
     update.add_argument('--no-backup', action='store_true', help='один раз обновиться без бекапа (самопроверка и откат остаются)')
 
     tr = sub.add_parser("try", help="Полигон: потрогать отдельную часть")

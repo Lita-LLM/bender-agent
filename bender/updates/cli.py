@@ -10,8 +10,8 @@ def main(args):
     async def run():
         app = App(args.data or default_data_dir())
         try:
-            if getattr(args, 'realign', False):
-                result = await app.updater.realign(skip_backup=bool(getattr(args, 'no_backup', False)))
+            if getattr(args, 'realign', False) or getattr(args, 'clean', False):
+                result = await app.updater.realign(skip_backup=bool(getattr(args, 'no_backup', False)), clean=bool(getattr(args, 'clean', False)))
                 print(result['message'])
                 if result['realigned']: print(await app.updater.restart())
                 return 0

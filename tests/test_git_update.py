@@ -259,6 +259,22 @@ class GitUpdateTest(TempDirCase):
         finally: await app.close()
 
     @async_test
+    async def test_clean_reinstall_wipes_program_edits_but_keeps_data(self):
+        self.setup_repo(); app = self.application()
+        data = app.dirs.work / 'важное.txt'; data.write_text('данные хозяина')
+        try:
+            (self.clone / 'bender/__main__.py').write_text('# чужая правка\n')
+            (self.clone / 'bender/лишний.py').write_text('x=1\n')
+            with self.assertRaises(HumanError): await app.updater.check()
+            result = await app.updater.realign(clean=True)
+            self.assertTrue(result['realigned'])
+            self.assertEqual((self.clone / 'bender/__main__.py').read_text(), self.program)
+            self.assertFalse((self.clone / 'bender/лишний.py').exists())
+            self.assertEqual(data.read_text(), 'данные хозяина')
+            self.assertFalse((await app.updater.check())['available'])
+        finally: await app.close()
+
+    @async_test
     async def test_stray_files_outside_code_do_not_block(self):
         self.setup_repo(); app = self.application()
         try:
@@ -432,3 +448,43 @@ class GitUpdateTest(TempDirCase):
         self.assertIn('Исправить программу', out.getvalue())
         self.assertIn('Программа обновлена', out.getvalue())
         self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), self.git(self.writer, 'rev-parse', 'HEAD'))
+
+
+class GitFailureReasonTest(TempDirCase):
+    """Сбой git показывает шаг и вид причины, а не одну общую фразу; URL с токеном наружу не уходит."""
+
+    def repo(self):
+        path = Path(self.tmp) / 'repo'
+        path.mkdir()
+        subprocess.run(['git', 'init', '-q', str(path)], check=True)
+        return path
+
+    @async_test
+    async def test_missing_remote_ref_is_named_with_step(self):
+        from bender.updates.git import command
+        repo = self.repo()
+        remote = Path(self.tmp) / 'remote'
+        subprocess.run(['git', 'init', '-q', '--bare', str(remote)], check=True)
+        with self.assertRaises(HumanError) as caught:
+            await command(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo), 'fetch', '--quiet', '--', str(remote),
+                           '+refs/heads/nope:refs/remotes/origin/nope'], repo)
+        self.assertIn('шаг «fetch»', caught.exception.title)
+        self.assertIn('Ветка не найдена', caught.exception.title)
+
+    def test_step_name_skips_config_options(self):
+        from bender.updates.git import git_step
+        self.assertEqual(git_step(['git', '-c', 'core.hooksPath=/dev/null', '-C', '/x', 'rev-parse', 'HEAD']), 'rev-parse')
+        self.assertEqual(git_step(['git', 'status']), 'git')
+
+    def test_failure_table_maps_network_and_auth(self):
+        from bender.updates.git import FAILURES
+        def reason(text):
+            low = text.lower()
+            for needles, title, _hint in FAILURES:
+                if any(s in low for s in needles): return title
+            return None
+        self.assertEqual(reason("fatal: unable to access 'https://github.com/x/y/': Could not resolve host: github.com"), 'Нет связи с GitHub')
+        self.assertEqual(reason("remote: Invalid username or password. fatal: Authentication failed"), 'GitHub не пустил к приватному репозиторию')
+        self.assertEqual(reason('fatal: unable to access: The requested URL returned error: 403'), 'GitHub не пустил к приватному репозиторию')
+        self.assertEqual(reason('error: index.lock exists'), 'Нет прав на папку программы')
+        self.assertIsNone(reason('something unexpected'))

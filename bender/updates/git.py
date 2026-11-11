@@ -63,12 +63,43 @@ async def command(argv, cwd, *, allow_failure=False, timeout=120):
     out, err = bytes(out), bytes(err)
     text = out.decode('utf-8', 'replace')
     if proc.returncode and not allow_failure:
-        # Вывод git/помощника может содержать URL с токеном: наружу только фиксированные причины.
+        # Вывод git/помощника может содержать URL с токеном: наружу только фиксированные причины и имя шага.
         failure = err.decode('utf-8', 'replace').lower()
-        if any(s in failure for s in ('401', '403', 'repository not found', 'could not read username', 'authentication failed', 'could not read password')):
-            raise error('GitHub не пустил к приватному репозиторию', 'Выполни gh auth login (или gh auth setup-git) и повтори.')
-        raise error('Git не смог проверить или обновить ветку', 'Проверь интернет, права на папку и выбранную ветку. Вход в приватный GitHub: gh auth login и gh auth setup-git.')
+        step = git_step(argv)
+        for needles, title, hint in FAILURES:
+            if any(s in failure for s in needles):
+                raise error(title + ' (шаг «' + step + '»)', hint)
+        raise error('Git не смог проверить или обновить ветку (шаг «' + step + '»)', 'Проверь интернет, права на папку и выбранную ветку. Вход в приватный GitHub: gh auth login и gh auth setup-git.')
     return proc.returncode, text
+
+
+# Причины сбоя git: (фрагменты stderr в нижнем регистре, заголовок, подсказка). Порядок важен: вход проверяется первым.
+FAILURES = (
+    (('401', '403', 'repository not found', 'could not read username', 'authentication failed', 'could not read password'),
+     'GitHub не пустил к приватному репозиторию', 'Выполни gh auth login (или gh auth setup-git) и повтори.'),
+    (('permission denied (publickey)', 'host key verification failed', 'could not read from remote repository'),
+     'Сервер не принял ключ SSH', 'Настрой ключ SSH для GitHub или переведи клон на https и выполни gh auth setup-git.'),
+    (('could not resolve host', 'failed to connect', 'connection timed out', 'operation timed out', 'network is unreachable',
+      'connection refused', 'unable to access', 'ssl', 'tls'),
+     'Нет связи с GitHub', 'Проверь интернет, прокси и доступ к github.com; повтори позже.'),
+    (("couldn't find remote ref", 'not a valid ref', 'unknown revision', 'invalid refspec', 'bad revision', 'no such ref'),
+     'Ветка не найдена на сервере', 'Проверь, что ветка клона отслеживает существующую ветку origin, и повтори.'),
+    (('index.lock', 'could not lock', 'unable to create', 'permission denied', 'read-only file system'),
+     'Нет прав на папку программы', 'Проверь права на папку программы и занятость файлов; закрой другие программы с этой папкой и повтори.'),
+    (('not a git repository',),
+     'Папка программы не похожа на клон git', 'Установи программу заново из клона git или выбери правильную папку.'),
+)
+
+
+def git_step(argv):
+    """Название git-команды из argv (после -C <папка> и -c настроек)."""
+    try:
+        i = argv.index('-C') + 2
+    except ValueError:
+        return 'git'
+    while i < len(argv) and argv[i].startswith('-'):
+        i += 1
+    return argv[i] if i < len(argv) else 'git'
 
 
 class GitUpdate:
@@ -166,16 +197,36 @@ class GitUpdate:
         _, log = await self.git('log', '--format=%h %s', head + '..' + target)
         return {'head': head, 'target': target, 'branch': branch, 'commits': log.splitlines(), 'available': head != target}
 
-    async def realign(self, *, skip_backup=False):
+    async def wipe_guard(self):
+        """Чистая переустановка стирает всё, что не в git и не в .gitignore. Папка данных внутри программы должна быть в .gitignore,
+        иначе её не тронуть нельзя; ключи и агенты лежат в данных. Возвращает список того, что будет стёрто (для журнала)."""
+        from ..core.pathutil import within
+        data = self.app.dirs.root.resolve()
+        if data == self.root.resolve() or within(data, self.root.resolve()):
+            rel = str(data.relative_to(self.root.resolve()))
+            if (await self.git('check-ignore', '-q', '--', rel + '/x', allow_failure=True))[0]:
+                raise error('Папка данных внутри программы не защищена от очистки', 'Добавь «/' + rel + '/» в .gitignore клона или запусти Бендера с --data вне папки программы; ничего не тронуто.')
+        _, status = await self.git('status', '--porcelain', '-z', '--untracked-files=all')
+        names = []
+        entries = iter(status.split('\0'))
+        for entry in entries:
+            if len(entry) < 4: continue
+            if entry[0] in 'RC': next(entries, None)
+            names.append(entry[3:])
+        return names
+
+    async def realign(self, *, skip_backup=False, clean=False):
         """Восстановление после расхождения (сервер пересобрал историю): ветка клона приводится к серверной.
         Прежний коммит остаётся в ветке bender-before-realign-…, перед сбросом — бекап, после — самопроверка с возвратом при неудаче.
-        Незакоммиченные правки в папке программы по-прежнему мешают: их не трогаем."""
+        Незакоммиченные правки в папке программы по-прежнему мешают: их не трогаем.
+        clean=True — «чистая переустановка»: правки и лишние файлы программы стираются (после бекапа), а данные
+        (папка данных, ключи, агенты — всё в .gitignore) остаются. Это же лечит рассинхрон перевода строк на Windows."""
         import time
         from ..core.errors import HumanError
         from ..tools.registry import ToolContext
         self.enabled()
         await ToolContext(self.app, actor='owner').check('update.install', str(self.root), 'выровнять клон программы с сервером после расхождения истории')
-        await self.clean()
+        dropped = await self.wipe_guard() if clean else await self.clean() or []
         _, branch = await self.git('symbolic-ref', '--quiet', '--short', 'HEAD', allow_failure=True)
         branch = branch.strip()
         if not branch: raise error('Программа стоит на отдельном коммите', 'Выбери обычную ветку клона.')
@@ -190,7 +241,7 @@ class GitUpdate:
             await self.git('fetch', '--quiet', '--force', '--', remote, '+' + ref + ':' + tracking)
             _, head = await self.git('rev-parse', 'HEAD'); _, target = await self.git('rev-parse', tracking)
             head, target = head.strip(), target.strip()
-            if head == target:
+            if head == target and not (clean and dropped):
                 self.finish(True, 'Клон уже совпадает с сервером.')
                 return {'realigned': False, 'message': 'Клон уже совпадает с сервером.'}
             saved = 'bender-before-realign-' + str(int(time.time()))
@@ -202,6 +253,7 @@ class GitUpdate:
                 backup = await self.safe_backup()
             self.mark('Выравниваю с сервером')
             await self.git('reset', '--hard', target)
+            if clean: await self.git('clean', '-fd')  # без -x: игнорируемое (данные, ключи, .env) не трогаем
             self.mark('Самопроверка')
             try: healthy = await self.doctor()
             except Exception: healthy = False
@@ -210,7 +262,7 @@ class GitUpdate:
                 reasons = getattr(self, 'doctor_reasons', None) or []
                 raise error('Самопроверка после выравнивания не прошла — возвращён прежний коммит', ('Что не прошло: ' + '; '.join(reasons) + '. ' if reasons else '') + 'Данные не тронуты.')
             self.app.store.meta_set('updates:available', None)
-            self.app.journal.write('update', 'Клон выровнен с сервером после расхождения истории', actor='owner', data={'from': head, 'to': target, 'saved_branch': saved})
+            self.app.journal.write('update', 'Клон выровнен с сервером после расхождения истории' + (' (чистая переустановка)' if clean else ''), actor='owner', data={'from': head, 'to': target, 'saved_branch': saved, 'wiped': dropped[:50], 'wiped_count': len(dropped)})
             self.finish(True, 'Клон выровнен с сервером. Прежний коммит сохранён в ветке ' + saved + '.')
             return {'realigned': True, 'head': target, 'saved_branch': saved, 'backup': backup, 'message': 'Клон выровнен с сервером. Прежний коммит сохранён в ветке ' + saved + '.'}
         except HumanError as exc:

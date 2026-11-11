@@ -1390,7 +1390,7 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
     async def update_realign(req):
         if app.mind.turns or app.team.running:
             raise HumanError('update_busy', 'Сначала дождись завершения ходов', 'Выравнивание заменит программу и потребует перезапуска.')
-        result = await app.updater.realign(skip_backup=body(req).get('skip_backup') is True)
+        result = await app.updater.realign(skip_backup=body(req).get('skip_backup') is True, clean=body(req).get('clean') is True)
         if result['realigned']: result['restart'] = await app.updater.restart()
         return result
 
