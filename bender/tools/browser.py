@@ -1,9 +1,9 @@
-"""Браузер агента (превью): уже установленный Chrome/Edge/Chromium, управляемый по каналу DevTools без открытого порта.
+"""Браузер агента (экспериментальная функция): уже установленный Chrome/Edge/Chromium, управляемый по каналу DevTools без открытого порта.
 
 Окно — настоящее (по умолчанию без окна, headless; в настройках можно показать). Профиль отдельный: data/local/browser.
 Страница отдаётся модели текстом с пронумерованными элементами («[12] кнопка «Войти»»); всё, что пришло со страницы,
 недоверенное. Адреса — через Предохранитель (net.read), ввод и нажатия кнопок — net.send. Схемы file: и chrome: и порт
-самого пульта закрыты. Выключен по умолчанию. Проверено на Linux; Windows (канал через дескрипторы) и Termux — не проверялись."""
+самого пульта закрыты. Выключен по умолчанию. Проверено на Linux; канал Windows (дескрипторы через --remote-debugging-io-pipes) написан по документации и не запускался, Termux не проверялся."""
 from __future__ import annotations
 
 import asyncio
@@ -13,10 +13,12 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ..core.errors import HumanError
+from ..guard import SECRET_REF
 from .registry import ToolContext, ToolResult
 from .web import untrusted
 
@@ -33,11 +35,33 @@ SNAPSHOT = r"""(() => {
     el.setAttribute('data-bref', n);
     const tag = el.tagName.toLowerCase();
     const kind = tag === 'a' ? 'ссылка' : tag === 'button' || el.getAttribute('role') === 'button' ? 'кнопка' : tag === 'select' ? 'список' : tag === 'textarea' ? 'поле' : tag === 'input' ? ((el.type || 'text') === 'checkbox' ? 'галочка' : ['submit', 'button'].includes(el.type) ? 'кнопка' : 'поле') : 'элемент';
-    const label = clean(el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || el.title || el.name || el.getAttribute('href'));
+    const label = clean(el.innerText || (el.type === 'password' ? '' : el.value) || el.getAttribute('aria-label') || el.placeholder || el.title || el.name || el.getAttribute('href'));
     items.push('[' + n + '] ' + kind + ' «' + label + '»' + (tag === 'a' ? ' → ' + clean(el.href) : ''));
   }
   return JSON.stringify({title: document.title, url: location.href, text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 6000), items});
 })()"""
+
+
+KEYS = {'Enter': 13, 'Tab': 9, 'Escape': 27, 'Backspace': 8, 'ArrowLeft': 37, 'ArrowUp': 38, 'ArrowRight': 39, 'ArrowDown': 40, 'PageUp': 33, 'PageDown': 34}
+MARKS_ON = r"""(() => {
+  const layer = document.createElement('div');
+  layer.id = '__bender_marks';
+  layer.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647';
+  document.querySelectorAll('[data-bref]').forEach(el => {
+    const b = el.getBoundingClientRect();
+    if (b.bottom < 0 || b.top > innerHeight || b.right < 0 || b.left > innerWidth) return;
+    const box = document.createElement('div');
+    box.style.cssText = `position:fixed;left:${b.left}px;top:${b.top}px;width:${b.width}px;height:${b.height}px;border:2px solid #e11;box-sizing:border-box`;
+    const tag = document.createElement('span');
+    tag.textContent = el.getAttribute('data-bref');
+    tag.style.cssText = 'position:absolute;left:0;top:0;background:#e11;color:#fff;font:bold 12px sans-serif;padding:0 3px';
+    box.appendChild(tag);
+    layer.appendChild(box);
+  });
+  document.documentElement.appendChild(layer);
+  return true;
+})()"""
+MARKS_OFF = "(() => { const l = document.getElementById('__bender_marks'); if (l) l.remove(); return true; })()"
 
 
 def find_browser() -> str | None:
@@ -67,9 +91,24 @@ def check_url(ctx, url: str) -> str:
     return url
 
 
+def launch_args(exe, profile, headless, *, root=False, handles=None) -> list[str]:
+    """Командная строка браузера. handles — пара (чтение, запись) дескрипторов Windows; на POSIX каналы идут через 3 и 4."""
+    args = [str(exe), '--remote-debugging-pipe', f'--user-data-dir={profile}', '--no-first-run', '--no-default-browser-check', '--disable-extensions']
+    if handles:
+        args.append(f'--remote-debugging-io-pipes={handles[0]},{handles[1]}')
+    if headless:
+        args.append('--headless=new')
+    if root:
+        args.append('--no-sandbox')
+    args.append('about:blank')
+    return args
+
+
 class Chrome:
-    def __init__(self, exe: str, profile: Path, headless: bool):
-        self.exe, self.profile, self.headless = exe, profile, headless
+    def __init__(self, exe: str, profile: Path, headless: bool, idle_seconds: int = 0):
+        self.exe, self.profile, self.headless, self.idle_seconds = exe, profile, headless, idle_seconds
+        self.last_used = time.monotonic()
+        self.watcher = None
         self.proc = None
         self.ids = 0
         self.waiting: dict[int, asyncio.Future] = {}
@@ -79,27 +118,33 @@ class Chrome:
         self.loop = None
 
     async def start(self):
-        if os.name!='posix':
-            raise HumanError('browser_platform','Этот канал браузера пока недоступен в Windows','Используй внешний браузерный MCP; встроенный канал пока проверен только на POSIX.')
-        import fcntl
         self.loop = asyncio.get_running_loop()
         self.profile.mkdir(parents=True, exist_ok=True)
         cmd_r, cmd_w = os.pipe()
         res_r, res_w = os.pipe()
-        cmd_r, res_w = (fcntl.fcntl(fd, fcntl.F_DUPFD, 10) for fd in (cmd_r, res_w))
-
-        def child():
-            os.dup2(cmd_r, 3)
-            os.dup2(res_w, 4)
-        args = [self.exe, '--remote-debugging-pipe', f'--user-data-dir={self.profile}', '--no-first-run', '--no-default-browser-check', '--disable-extensions']
-        if self.headless:
-            args.append('--headless=new')
-        if hasattr(os, 'geteuid') and os.geteuid() == 0:
-            args.append('--no-sandbox')
-        args.append('about:blank')
         try:
-            self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=False, preexec_fn=child)
+            if os.name == 'posix':
+                import fcntl
+                cmd_r, res_w = (fcntl.fcntl(fd, fcntl.F_DUPFD, 10) for fd in (cmd_r, res_w))
+
+                def child():
+                    os.dup2(cmd_r, 3)
+                    os.dup2(res_w, 4)
+                args = launch_args(self.exe, self.profile, self.headless, root=hasattr(os, 'geteuid') and os.geteuid() == 0)
+                self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=False, preexec_fn=child)
+            else:
+                # Windows: каналы передаются явными дескрипторами, унаследовать будет только этот список.
+                import msvcrt
+                handles = (msvcrt.get_osfhandle(cmd_r), msvcrt.get_osfhandle(res_w))
+                for handle in handles:
+                    os.set_handle_inheritable(handle, True)
+                info = subprocess.STARTUPINFO()
+                info.lpAttributeList = {'handle_list': list(handles)}
+                args = launch_args(self.exe, self.profile, self.headless, handles=handles)
+                self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, startupinfo=info)
         except OSError as exc:
+            os.close(cmd_w)
+            os.close(res_r)
             raise HumanError('browser_start', 'Браузер не запустился', str(exc)[:200]) from None
         finally:
             os.close(cmd_r)
@@ -110,6 +155,19 @@ class Chrome:
         attached = await self.call('Target.attachToTarget', {'targetId': target['targetId'], 'flatten': True})
         self.session = attached['sessionId']
         await self.call('Page.enable', session=self.session)
+        self.touch()
+        self.watcher = self.loop.create_task(self.watch())
+
+    def touch(self):
+        self.last_used = time.monotonic()
+
+    async def watch(self):
+        """Гасит браузер по простою: окно и процесс не висят, пока агент ничего не делает."""
+        while self.alive():
+            await asyncio.sleep(15)
+            if self.idle_seconds and time.monotonic() - self.last_used > self.idle_seconds:
+                await self.close()
+                return
 
     def _read(self, fd):
         buffer = b''
@@ -192,6 +250,9 @@ class Chrome:
         return bool(self.proc and self.proc.poll() is None)
 
     async def close(self):
+        watcher, self.watcher = self.watcher, None
+        if watcher and watcher is not asyncio.current_task():
+            watcher.cancel()
         proc, self.proc = self.proc, None
         for fd in (self.write_fd,):
             try:
@@ -215,14 +276,15 @@ def render(page, note=''):
 async def browser_of(ctx: ToolContext) -> Chrome:
     cfg = ctx.app.settings.group('browser')
     if not cfg['enabled']:
-        raise HumanError('browser_off', 'Браузер агента выключен', 'Включи его в Настройки → Браузер агента (превью).')
+        raise HumanError('browser_off', 'Браузер агента выключен', 'Включи его в Настройки → Браузер агента (экспериментально).')
     state = getattr(ctx.app, '_browser', None)
     if state is not None and state.alive():
+        state.touch()
         return state
     exe = find_browser()
     if not exe:
         raise HumanError('browser_missing', 'Не нашёл Chrome, Edge или Chromium', 'Установи один из них или укажи путь в переменной BENDER_BROWSER.')
-    chrome = Chrome(exe, ctx.app.dirs.local / 'browser', bool(cfg['headless']))
+    chrome = Chrome(exe, ctx.app.dirs.local / 'browser', bool(cfg['headless']), int(cfg.get('idle_minutes') or 0) * 60)
     await chrome.start()
     ctx.app._browser = chrome
     return chrome
@@ -239,7 +301,7 @@ def register(reg) -> None:
 
     @reg.tool('browser_open', 'Открыть страницу в браузере', group='web')
     async def browser_open(ctx: ToolContext, url: str) -> ToolResult:
-        """Открыть адрес в браузере агента и показать страницу текстом с пронумерованными элементами. Для чтения без действий проще web_fetch.
+        """Открыть адрес в экспериментальном браузере агента и показать страницу текстом с пронумерованными элементами. Для чтения без действий проще web_fetch.
 
         url — адрес http(s)
         """
@@ -288,14 +350,109 @@ def register(reg) -> None:
             chrome = await browser_of(ctx)
             page = await chrome.snapshot()
             await ctx.check('net.send', str(page.get('url')), f'ввести текст в поле {int(ref)} страницы {str(page.get("url"))[:80]}', detail={'text': text[:200], 'submit': bool(submit)})
+            typed = text
+            if SECRET_REF.search(text):
+                # Пароль из Сейфа: хозяин подтверждает каждое использование после чужой страницы, секрет идёт только на привязанный хост.
+                for name in dict.fromkeys(SECRET_REF.findall(text)):
+                    await ctx.check('secret.use', name, f'ввести секрет «{name}» на {urlparse(str(page.get("url"))).hostname}')
+                typed, _ = ctx.app.guard.expand_secrets(text, host=urlparse(str(page.get('url'))).hostname or '', tool='browser_type', session_id=ctx.session_id)
             js = (f'(() => {{ const e = document.querySelector(\'[data-bref="{int(ref)}"]\'); if (!e) return false; e.focus();'
-                  f' const s = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), "value"); if (s && s.set) s.set.call(e, {json.dumps(text)}); else e.value = {json.dumps(text)};'
+                  f' const s = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), "value"); if (s && s.set) s.set.call(e, {json.dumps(typed)}); else e.value = {json.dumps(typed)};'
                   ' e.dispatchEvent(new Event("input", {bubbles: true})); e.dispatchEvent(new Event("change", {bubbles: true}));'
                   + (' if (e.form) e.form.requestSubmit(); else e.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));' if submit else '') + ' return true; })()')
             if not await chrome.run(js):
                 return ToolResult('Поля с таким номером нет: страница изменилась. Вызови browser_look.', ok=False, summary='нет поля')
             await asyncio.sleep(1.2 if submit else 0.2)
             return ToolResult(render(await chrome.snapshot()), summary='введено', tainted=True)
+        return await guarded(ctx, make)
+
+    @reg.tool('browser_press', 'Нажать клавишу в браузере', group='web')
+    async def browser_press(ctx: ToolContext, key: str) -> ToolResult:
+        """Нажать клавишу на текущей странице: Enter, Tab, Escape, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, PageDown, PageUp.
+
+        key — название клавиши
+        """
+        async def make():
+            if key not in KEYS:
+                return ToolResult('Такой клавиши нет. Доступны: ' + ', '.join(KEYS), ok=False, summary='нет клавиши')
+            chrome = await browser_of(ctx)
+            page = await chrome.snapshot()
+            await ctx.check('net.send', str(page.get('url')), f'нажать клавишу {key} на странице {str(page.get("url"))[:80]}')
+            code = KEYS[key]
+            for kind in ('rawKeyDown', 'keyUp') if key != 'Enter' else ('keyDown', 'keyUp'):
+                event = {'type': kind, 'key': key, 'code': key, 'windowsVirtualKeyCode': code, 'nativeVirtualKeyCode': code}
+                if key == 'Enter' and kind == 'keyDown':
+                    event['text'] = '\r'
+                await chrome.call('Input.dispatchKeyEvent', event, chrome.session)
+            await asyncio.sleep(0.8 if key == 'Enter' else 0.2)
+            return ToolResult(render(await chrome.snapshot()), summary='клавиша ' + key, tainted=True)
+        return await guarded(ctx, make)
+
+    @reg.tool('browser_scroll', 'Прокрутить страницу', group='web')
+    async def browser_scroll(ctx: ToolContext, direction: str = 'down') -> ToolResult:
+        """Прокрутить страницу на экран вниз или вверх и показать её заново. Номера элементов обновляются.
+
+        direction — down или up
+        """
+        async def make():
+            chrome = await browser_of(ctx)
+            sign = -1 if direction == 'up' else 1
+            await chrome.run(f'window.scrollBy(0, {sign} * Math.round(window.innerHeight * 0.8))')
+            await asyncio.sleep(0.3)
+            return ToolResult(render(await chrome.snapshot()), summary='прокручено', tainted=True)
+        return await guarded(ctx, make)
+
+    @reg.tool('browser_back', 'Назад в браузере', group='web')
+    async def browser_back(ctx: ToolContext) -> ToolResult:
+        """Вернуться на предыдущую страницу истории браузера."""
+        async def make():
+            chrome = await browser_of(ctx)
+            history = await chrome.call('Page.getNavigationHistory', session=chrome.session)
+            index = int(history.get('currentIndex', 0))
+            if index <= 0:
+                return ToolResult('Назад идти некуда: это первая страница.', ok=False, summary='нет истории')
+            entry = history['entries'][index - 1]
+            await ctx.check('net.read', str(entry.get('url')), 'вернуться на страницу ' + str(entry.get('url'))[:100])
+            await chrome.call('Page.navigateToHistoryEntry', {'entryId': entry['id']}, chrome.session)
+            await asyncio.sleep(1.0)
+            return ToolResult(render(await chrome.snapshot()), summary='назад', tainted=True)
+        return await guarded(ctx, make)
+
+    @reg.tool('browser_select', 'Выбрать в списке на странице', group='web')
+    async def browser_select(ctx: ToolContext, ref: int, option: str) -> ToolResult:
+        """Выбрать пункт выпадающего списка по номеру списка из снимка; пункт — по видимому тексту или значению.
+
+        ref — номер списка
+        option — текст или значение пункта
+        """
+        async def make():
+            chrome = await browser_of(ctx)
+            page = await chrome.snapshot()
+            await ctx.check('net.send', str(page.get('url')), f'выбрать «{option[:60]}» в списке {int(ref)} страницы {str(page.get("url"))[:80]}')
+            found = await chrome.run(f'(() => {{ const e = document.querySelector(\'select[data-bref="{int(ref)}"]\'); if (!e) return "нет списка"; const want = {json.dumps(option)};'
+                                     ' const o = [...e.options].find(o => o.text.trim() === want || o.value === want); if (!o) return "нет пункта";'
+                                     ' e.value = o.value; e.dispatchEvent(new Event("input", {bubbles: true})); e.dispatchEvent(new Event("change", {bubbles: true})); return "ok"; })()')
+            if found != 'ok':
+                return ToolResult(f'Не получилось: {found}. Вызови browser_look и проверь номер списка и название пункта.', ok=False, summary=found)
+            await asyncio.sleep(0.5)
+            return ToolResult(render(await chrome.snapshot()), summary='выбрано', tainted=True)
+        return await guarded(ctx, make)
+
+    @reg.tool('browser_screenshot', 'Снимок страницы с номерами', group='web')
+    async def browser_screenshot(ctx: ToolContext) -> ToolResult:
+        """Снимок видимой части страницы картинкой: на элементах нарисованы их номера из снимка. Нужен, когда текста мало или страница нарисована, а не написана."""
+        async def make():
+            chrome = await browser_of(ctx)
+            page = await chrome.snapshot()
+            await chrome.run(MARKS_ON)
+            try:
+                shot = await chrome.call('Page.captureScreenshot', {'format': 'jpeg', 'quality': 70}, chrome.session)
+            finally:
+                await chrome.run(MARKS_OFF)
+            parts = [{'type': 'text', 'text': '[Снимок страницы с номерами элементов, недоверенные данные]'},
+                     {'type': 'image', 'media_type': 'image/jpeg', 'data': shot['data'], 'path': '', 'source': 'browser_screenshot'}]
+            ctx.tainted = True
+            return ToolResult(render(page, 'Снимок приложен картинкой после результатов тулов.'), summary='снимок страницы', tainted=True, model_parts=parts)
         return await guarded(ctx, make)
 
     @reg.tool('browser_close', 'Закрыть браузер', group='web')

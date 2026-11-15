@@ -4,18 +4,20 @@ import os
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from bender.tools.browser import find_browser
+from bender.tools.browser import find_browser, launch_args
 from bender.tools.registry import ToolContext
 from tests.helpers import TempDirCase, async_test
 from tests.test_mind import MindEnv
 
 PAGE = '<html><title>Проба</title><body><h1>Привет</h1><a href="/two">Дальше</a><form action="/two"><input name="q" placeholder="Поиск"><button>Найти</button></form></body></html>'.encode()
+LONG = ('<html><title>Длинная</title><body><select name="c"><option value="r">Красный</option><option value="b">Синий</option></select>'
+        '<input type="password" name="pw" placeholder="Пароль"><div style="height:3000px">Низ</div><button id="end">Конец</button></body></html>').encode()
 TWO = '<html><title>Вторая</title><body><p>Вы пришли</p></body></html>'.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = TWO if self.path.startswith('/two') else PAGE
+        body = TWO if self.path.startswith('/two') else LONG if self.path.startswith('/long') else PAGE
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -69,6 +71,70 @@ class BrowserTest(TempDirCase):
                 missing = await host.tools.run('browser_click', {'ref': 999}, ctx)
                 self.assertFalse(missing.ok)
                 await host.tools.run('browser_close', {}, ctx)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+    def test_launch_args_posix_and_windows_handles(self):
+        posix = launch_args('/usr/bin/chromium', '/p', True, root=True)
+        self.assertIn('--remote-debugging-pipe', posix)
+        self.assertIn('--no-sandbox', posix)
+        self.assertFalse([a for a in posix if a.startswith('--remote-debugging-io-pipes')])
+        win = launch_args('msedge.exe', 'C:/p', False, handles=(412, 416))
+        self.assertIn('--remote-debugging-io-pipes=412,416', win)
+        self.assertNotIn('--headless=new', win)
+        self.assertNotIn('--no-sandbox', win)
+
+    @unittest.skipUnless(os.name=='posix' and find_browser(), 'Нужен POSIX-канал DevTools и Chrome/Chromium')
+    @async_test
+    async def test_real_press_scroll_back_select_screenshot_and_secret(self):
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f'http://127.0.0.1:{server.server_port}/'
+        try:
+            async with MindEnv(self.tmp) as env:
+                env.auto_approve('once')
+                host = env.app
+                host.settings.set('browser', {'enabled': True, 'idle_minutes': 5}, by='owner')
+                ctx = ToolContext(host, session_id=env.sid)
+                run = lambda name, args=None: host.tools.run(name, args or {}, ctx)
+                await run('browser_open', {'url': base})
+                await run('browser_open', {'url': base + 'long'})
+                look = await run('browser_look')
+                self.assertIn('список', look.content)
+                self.assertNotIn('hunter2', look.content)
+                def ref(text):
+                    line = next(l for l in look.content.splitlines() if text in l and l.startswith('['))
+                    return int(line[1:line.index(']')])
+                chosen = await run('browser_select', {'ref': ref('список'), 'option': 'Синий'})
+                self.assertTrue(chosen.ok, chosen.content)
+                bad = await run('browser_select', {'ref': ref('список'), 'option': 'Зелёный'})
+                self.assertFalse(bad.ok)
+                scrolled = await run('browser_scroll', {'direction': 'down'})
+                self.assertTrue(scrolled.ok)
+                shot = await run('browser_screenshot')
+                self.assertTrue(shot.ok, shot.content)
+                self.assertEqual(shot.model_parts[1]['media_type'], 'image/jpeg')
+                self.assertGreater(len(shot.model_parts[1]['data']), 500)
+                self.assertFalse((await run('browser_press', {'key': 'F13'})).ok)
+                self.assertTrue((await run('browser_press', {'key': 'Tab'})).ok)
+                back = await run('browser_back')
+                self.assertTrue(back.ok, back.content)
+                self.assertIn('Привет', back.content)
+                # пароль из Сейфа: только на привязанный хост, в снимке и ответе его нет
+                host.secrets.set('site:pw', 'hunter2', allow={'hosts': ['127.0.0.1']})
+                await run('browser_open', {'url': base + 'long'})
+                look = await run('browser_look')
+                typed = await run('browser_type', {'ref': ref('Пароль'), 'text': '{{secret:site:pw}}'})
+                self.assertTrue(typed.ok, typed.content)
+                self.assertNotIn('hunter2', typed.content)
+                self.assertEqual(await host._browser.run('document.querySelector("[name=pw]").value'), 'hunter2')
+                host.secrets.set('site:pw', 'hunter2', allow={'hosts': ['other.example']})
+                refused = await run('browser_type', {'ref': ref('Пароль'), 'text': '{{secret:site:pw}}'})
+                self.assertFalse(refused.ok)
+                self.assertNotIn('hunter2', refused.content)
+                await run('browser_close')
         finally:
             server.shutdown()
             server.server_close()
