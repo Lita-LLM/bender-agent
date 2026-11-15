@@ -232,8 +232,12 @@ class Registry:
         except Halted:
             raise
         except Denied as e:
-            res = ToolResult(f"Отказано Предохранителем: {e.decision.reason}\n{denial_layer(ctx.app, e.decision)}", ok=False, summary=f"{t.title}: отказано",
-                             data={"denied": {"rule": e.decision.rule or "", "reason": (e.decision.reason or "")[:300]}})
+            before = [str(x)[:300] for x in e.data.get("failures") or []][:8]
+            res = ToolResult(f"Отказано Предохранителем: {e.decision.reason}\n{denial_layer(ctx.app, e.decision)}"
+                             + ("\nДо отказа: " + "; ".join(before) if before else ""), ok=False,
+                             summary=f"{t.title}: отказано ({e.decision.rule or '?'})",
+                             data={"denied": {"rule": e.decision.rule or "", "reason": (e.decision.reason or "")[:300],
+                                              **({"provider": e.data["provider"]} if e.data.get("provider") else {}), **({"failures": before} if before else {})}})
         except HumanError as e:
             res = ToolResult(f"Ошибка: {e.title}. {e.hint}".strip(), ok=False, summary=f"{t.title}: {e.title}")
         except Exception as e:  # noqa: BLE001

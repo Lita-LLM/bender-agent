@@ -143,7 +143,13 @@ class Search:
                 if name in ("brave", "tavily"):
                     if not credential:
                         raise SearchError("Не настроен ключ поиска", name)
-                    await ctx.check("secret.use", key_name, f"использовать ключ поиска {name}")
+                    # Ключ поиска, привязанный в Сейфе к хосту этого же поставщика, уходит только ему, а модель его не видит.
+                    # Данные из заражённого хода и так могут уйти туда запросом (net.read выше разрешён), так что отдельный отказ
+                    # на секрете только срывает фоновый поиск. Ключ без привязки к хосту проходит прежнюю проверку secret.use.
+                    hosts = (app.secrets.allow(key_name) or {}).get("hosts") or []
+                    host = host_of(endpoint)
+                    bound = bool(host) and any(host == h or host.endswith("." + h.lstrip("*.")) for h in hosts)
+                    await ctx.check("secret.use", key_name, f"использовать ключ поиска {name}", detail={"search_key": name, "host": host} if bound else {})
                     credential, _ = app.guard.expand_secrets("{{secret:" + key_name + "}}", host=host_of(endpoint), tool="web_search", session_id=ctx.session_id)
                     headers["X-Subscription-Token" if name == "brave" else "Authorization"] = credential if name == "brave" else "Bearer " + credential
                 now = time.monotonic()
@@ -206,7 +212,9 @@ class Search:
                 while len(self.cache) > 128:
                     self.cache.popitem(last=False)
                 return {**result, "failures": errors}
-            except Denied:
+            except Denied as exc:
+                # Отказ Предохранителя не обходится другим поставщиком, но прежние причины не теряются (в них нет ключей и запросов).
+                exc.data.update({"provider": name, "failures": list(errors)})
                 raise
             except (HumanError, NetError, ValueError, TypeError, AttributeError) as exc:
                 errors.append(name + ": " + app.guard.scrub(str(exc)))

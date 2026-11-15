@@ -310,6 +310,10 @@ class Policy:
             if rule.get("verdict") == "allow" and not blocked and cap not in IRREVERSIBLE:
                 return Decision("allow", f"Правило хозяина: {rule.get('note') or 'разрешено'}.", f"owner-rule:{rule.get('id')}")
 
+        # Ключ поиска, привязанный в Сейфе к хосту поставщика: уходит только ему, модель его не видит.
+        if cap == "secret.use" and a.tool == "web_search" and a.detail.get("search_key") and a.detail.get("host"):
+            return Decision("allow", "Ключ поиска используется только для своего поставщика (хост привязан в Сейфе).", "search-key")
+
         # 5. заражённый ход
         if a.tainted and cap in exfil and not (cap == "msg.send" and a.to_owner):
             return Decision("ask", "В этом ходе агент читал недоверенное (сеть, чужие сообщения, внешние тулы). "

@@ -75,9 +75,12 @@ def register(reg) -> None:
         lang — язык выдачи, если поддерживается поставщиком
         """
         from ..core.errors import HumanError
+        from .registry import Denied
 
         try:
             result = await ctx.app.search.search(query, count, lang, ctx)
+        except Denied:
+            raise  # отказ Предохранителя разбирает реестр: правило, слой и прежние причины остаются в результате
         except HumanError as exc:
             return ToolResult(untrusted("ошибка поиска", ctx.app.guard.scrub(f"{exc.title}. {exc.hint}")), ok=False,
                               tainted=ctx.tainted, summary="поиск недоступен")
