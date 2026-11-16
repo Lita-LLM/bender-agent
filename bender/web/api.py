@@ -657,20 +657,30 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
     @r.route("GET", "/api/secrets")
     @J
     async def secrets(req):
-        return {"secrets": app.secrets.public()}
+        from ..net.search import unbound_keys
+        return {"secrets": app.secrets.public(), "unbound_search": unbound_keys(app)}
 
     @r.route("POST", "/api/secrets")
     @J
     async def add_secret(req):
         b = body(req)
         name = str(b.get("name") or "").strip()
-        if not name or not b.get("value"):
-            raise HumanError("bad_secret", "Нужны имя и значение", "")
-        hosts = [h.strip() for h in str(b.get("hosts") or "").split(",") if h.strip()]
+        hosts = [h.strip().lower() for h in str(b.get("hosts") or "").split(",") if h.strip()]
         tools = [t.strip() for t in str(b.get("tools") or "").split(",") if t.strip()]
+        if name and not b.get("value") and name in app.secrets.names():
+            # Только «где можно»: значение остаётся прежним, пустое не затирает ключ.
+            if not (hosts or tools):
+                raise HumanError("bad_secret", "Укажи хосты или тулы", "Без значения меняются только места, где ключ можно использовать.")
+            app.secrets.set_allow(name, {"hosts": hosts, "tools": tools})
+            app.journal.write("secrets", f"Хозяин поменял места секрета «{name}»", actor="owner", data={"hosts": hosts, "tools": tools})
+            from ..net.search import unbound_keys
+            return {"secrets": app.secrets.public(), "unbound_search": unbound_keys(app)}
+        if not name or not b.get("value"):
+            raise HumanError("bad_secret", "Нужны имя и значение", "Чтобы поменять только хосты у существующего ключа, оставь значение пустым.")
         app.secrets.set(name, str(b["value"]), note=str(b.get("note") or ""), allow={"hosts": hosts, "tools": tools})
         app.journal.write("secrets", f"Секрет «{name}» сохранён", actor="owner", data={"hosts": hosts, "tools": tools})
-        return {"secrets": app.secrets.public()}
+        from ..net.search import unbound_keys
+        return {"secrets": app.secrets.public(), "unbound_search": unbound_keys(app)}
 
     @r.route("DELETE", "/api/secrets/{name}")
     @J

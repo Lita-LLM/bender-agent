@@ -78,6 +78,19 @@ class Secrets:
             data[name] = item
             self._save(data)
 
+    def set_allow(self, name: str, allow: dict) -> bool:
+        """Поменять только «где можно» (хосты и тулы); значение ключа не трогается."""
+        with self._lock:
+            data = dict(self._load())
+            if not isinstance(data.get(name), dict):
+                return False
+            item = dict(data[name])
+            item["allow"] = {"hosts": list(allow.get("hosts") or []), "tools": list(allow.get("tools") or [])}
+            item["updated_at"] = time.time()
+            data[name] = item
+            self._save(data)
+            return True
+
     def reuse(self, name: str, value: str, note: str = '', allow: dict | None = None) -> str:
         """Общий ключ хранится один раз; существующее другое значение не затирается."""
         with self._lock:

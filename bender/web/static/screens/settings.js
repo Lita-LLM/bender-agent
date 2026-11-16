@@ -34,12 +34,21 @@ function FieldEditor({ group, f, onSaved }) {
 
 function Secrets() {
   const [list, setList] = useState([]);
+  const [unbound, setUnbound] = useState([]);
   const [form, setForm] = useState({ name: "", value: "", hosts: "", tools: "", note: "" });
-  const load = () => get("/api/secrets").then((r) => setList(r.secrets));
+  const show = (r) => { setList(r.secrets); setUnbound(r.unbound_search || []); };
+  const load = () => get("/api/secrets").then(show);
+  const bind = async (u) => {
+    const s = list.find((x) => x.name === u.name) || {};
+    const hosts = [...new Set([...(s.allow?.hosts || []), u.host])].join(", ");
+    try { show(await post("/api/secrets", { name: u.name, hosts, tools: (s.allow?.tools || []).join(", ") })); toast(`Ключ ${u.name} привязан к ${u.host}`); } catch (e) { toast(e.message, "error"); }
+  };
   useEffect(() => { load(); }, []);
   const add = async () => { try { await post("/api/secrets", form); setForm({ name: "", value: "", hosts: "", tools: "", note: "" }); load(); } catch (e) { toast(e.message, "error"); } };
   return html`<div class="card"><h3>Сейф</h3>
     <div class="note">Ключи и токены. Агент их не видит: пишет <code>{{secret:имя}}</code>, значение подставляет Предохранитель — и только туда, где этому секрету разрешено. Хранится файлом с правами 600, без шифрования.</div>
+    ${unbound.map((u) => html`<div class="note" style="border-color:var(--warn,#c90)">Ключ поиска <code>${u.name}</code> не привязан к хосту <code>${u.host}</code>: в фоновых задачах после чужого текста поиск через ${u.provider} будет отказан.
+      <${Button} small onClick=${() => bind(u)}>Привязать к ${u.host}</${Button}></div>`)}
     <div class="list">${list.map((s) => html`<div class="list-item"><div class="li-main"><div class="li-title mono">${s.name}</div>
       <div class="li-sub">${s.masked}${s.note ? ` · ${s.note}` : ""}${s.allow?.hosts?.length ? ` · хосты: ${s.allow.hosts.join(", ")}` : ""}${s.allow?.tools?.length ? ` · тулы: ${s.allow.tools.join(", ")}` : ""}</div></div>
       ${s.name.startsWith("provider:") ? null : html`<${IconButton} small icon="trash" danger title="Удалить" onClick=${async () => { await del(`/api/secrets/${encodeURIComponent(s.name)}`); load(); }} />`}</div>`)}</div>
@@ -47,7 +56,8 @@ function Secrets() {
       <input aria-label="значение" class="input mono grow" type="password" placeholder="значение" value=${form.value} onInput=${(e) => setForm({ ...form, value: e.target.value })} /></div>
     <div class="row" style="margin-top:6px"><input aria-label="хосты через запятую (api.github.com)" class="input grow" placeholder="хосты через запятую (api.github.com)" value=${form.hosts} onInput=${(e) => setForm({ ...form, hosts: e.target.value })} />
       <input aria-label="тулы (run)" class="input" style="width:200px" placeholder="тулы (run)" value=${form.tools} onInput=${(e) => setForm({ ...form, tools: e.target.value })} />
-      <${Button} kind="primary" small disabled=${!form.name || !form.value} onClick=${add}>Сохранить</${Button}></div>
+      <${Button} kind="primary" small disabled=${!form.name || !(form.value || ((form.hosts || form.tools) && list.some((x) => x.name === form.name)))} onClick=${add}>Сохранить</${Button}></div>
+    <div class="faint" style="margin-top:4px">Чтобы поменять только хосты и тулы у сохранённого ключа, введи его имя и оставь значение пустым.</div>
   </div>`;
 }
 

@@ -98,6 +98,24 @@ class DuckResults(HTMLParser):
         self.item, self.capture = None, None
 
 
+def key_bound(app, key_name, host):
+    """Привязан ли ключ в Сейфе к хосту поставщика (точно или родительским доменом)."""
+    hosts = (app.secrets.allow(key_name) or {}).get("hosts") or []
+    return bool(host) and any(host == h or host.endswith("." + h.lstrip("*.")) for h in hosts)
+
+
+def unbound_keys(app):
+    """Ключи поиска, которые есть в Сейфе, но не привязаны к хосту своего поставщика: подсказка для пульта, без значений."""
+    settings = app.settings.group("search")
+    out = []
+    for name in ("brave", "tavily"):
+        key_name = str(settings.get(name + "_secret", "") or "")
+        host = host_of(str(settings.get(name + "_url", "") or "").strip())
+        if key_name and host and app.secrets.get(key_name) and not key_bound(app, key_name, host):
+            out.append({"name": key_name, "provider": name, "host": host})
+    return out
+
+
 class Search:
     def __init__(self, app):
         self.app = app
@@ -146,10 +164,15 @@ class Search:
                     # Ключ поиска, привязанный в Сейфе к хосту этого же поставщика, уходит только ему, а модель его не видит.
                     # Данные из заражённого хода и так могут уйти туда запросом (net.read выше разрешён), так что отдельный отказ
                     # на секрете только срывает фоновый поиск. Ключ без привязки к хосту проходит прежнюю проверку secret.use.
-                    hosts = (app.secrets.allow(key_name) or {}).get("hosts") or []
                     host = host_of(endpoint)
-                    bound = bool(host) and any(host == h or host.endswith("." + h.lstrip("*.")) for h in hosts)
-                    await ctx.check("secret.use", key_name, f"использовать ключ поиска {name}", detail={"search_key": name, "host": host} if bound else {})
+                    bound = key_bound(app, key_name, host)
+                    try:
+                        await ctx.check("secret.use", key_name, f"использовать ключ поиска {name}", detail={"search_key": name, "host": host} if bound else {})
+                    except Denied as exc:
+                        if not bound and host:
+                            exc.data["hint"] = (f"Ключ «{key_name}» не привязан к хосту {host}, поэтому после чужого текста без хозяина он не используется. "
+                                                f"Хозяину: «Настройки → Сейф» → «Привязать к {host}» (значение ключа не меняется).")
+                        raise
                     credential, _ = app.guard.expand_secrets("{{secret:" + key_name + "}}", host=host_of(endpoint), tool="web_search", session_id=ctx.session_id)
                     headers["X-Subscription-Token" if name == "brave" else "Authorization"] = credential if name == "brave" else "Bearer " + credential
                 now = time.monotonic()

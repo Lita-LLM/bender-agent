@@ -138,7 +138,60 @@ class SearchTest(TempDirCase):
             self.assertIn("До отказа", result.content)
             self.assertNotIn("sensitive-search-key", result.content)
             self.assertEqual([r["search"] for r in self.router.state.requests], ["duckduckgo"])
+            self.assertIn("Привязать к", result.content)
+            self.assertIn("не привязан к хосту", result.data["denied"]["hint"])
         finally:
+            await self.close()
+
+    @async_test
+    async def test_key_bound_to_other_host_denied_then_owner_binds_without_changing_value(self):
+        from bender.net.search import unbound_keys
+        await self.start()
+        try:
+            ctx = await self.background_ctx()
+            self.app.secrets.set("search:tavily", "sensitive-search-key", allow={"hosts": ["api.example.org"], "tools": ["web_search"]})
+            self.app.settings.set("search", {"providers": "tavily"})
+            result = await self.app.tools.run("web_search", {"query": "news"}, ctx)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["denied"]["rule"], "unattended")
+            [hint] = unbound_keys(self.app)
+            self.assertEqual(hint["name"], "search:tavily")
+            self.assertNotIn("sensitive-search-key", json.dumps(hint))
+            # Хозяин нажимает «Привязать»: меняются только места, значение ключа то же.
+            self.assertTrue(self.app.secrets.set_allow("search:tavily", {"hosts": ["api.example.org", hint["host"]], "tools": ["web_search"]}))
+            self.assertEqual(self.app.secrets.get("search:tavily"), "sensitive-search-key")
+            self.assertEqual(unbound_keys(self.app), [])
+            result = await self.app.tools.run("web_search", {"query": "news"}, ctx)
+            self.assertTrue(result.ok, result.content)
+        finally:
+            await self.close()
+
+    @async_test
+    async def test_owner_changes_only_places_of_saved_key_in_vault(self):
+        import asyncio
+        from bender.net.http_server import HttpServer
+        from tests.helpers import owner_web
+        from tests.test_hooks import _call
+        await self.start()
+        web = HttpServer(owner_web(self.app, allowed_hosts={"127.0.0.1"}))
+        await web.start("127.0.0.1", 0)
+        call = lambda path, body=None: asyncio.to_thread(_call, web.port, path, body, {"X-Bender": "1"} if body is not None else None)
+        try:
+            self.app.secrets.set("search:tavily", "sensitive-search-key", allow={"hosts": [], "tools": ["web_search"]})
+            code, out = await call("/api/secrets")
+            self.assertEqual([u["name"] for u in out["unbound_search"]], ["search:tavily"])
+            host = out["unbound_search"][0]["host"]
+            code, out = await call("/api/secrets", {"name": "search:tavily", "value": "", "hosts": "", "tools": ""})
+            self.assertEqual(code, 400)
+            code, out = await call("/api/secrets", {"name": "search:tavily", "value": "", "hosts": host, "tools": "web_search"})
+            self.assertEqual(code, 200, out)
+            self.assertEqual(out["unbound_search"], [])
+            self.assertEqual(self.app.secrets.get("search:tavily"), "sensitive-search-key")
+            self.assertNotIn("sensitive-search-key", json.dumps(out))
+            code, out = await call("/api/secrets", {"name": "unknown", "value": "", "hosts": host})
+            self.assertEqual(code, 400)
+        finally:
+            await web.stop()
             await self.close()
 
     def test_html_uses_elements_and_keeps_nested_text(self):
