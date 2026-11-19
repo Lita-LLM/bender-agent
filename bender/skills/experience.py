@@ -135,7 +135,11 @@ async def learn(skills, spec, ctx, *, draft=False):
         if skills.package(name, full=True)["data"] == data:
             return {"name": name, "enabled": skills.active(skills.package(name)), "unchanged": True}
         if ctx.tainted or (ctx.unattended and ctx.actor != "sleep"):
-            await ctx.check("skill.learn", name, "ПЕРЕЗАПИСАТЬ уже существующий навык (скрипты и файлы пакета заменятся)")
+            from ..guard.policy import Action
+            d = await ctx.app.guard.require_owner(Action("skill.learn", name, actor=ctx.actor, tool=ctx.tool, summary="ПЕРЕЗАПИСАТЬ уже существующий навык «" + name + "» (скрипты и файлы пакета заменятся)",
+                                                         tainted=ctx.tainted, unattended=ctx.unattended), "Ход читал чужое или идёт без хозяина, а навык уже есть — перезапись решает хозяин.", session_id=ctx.session_id)
+            if not d.allowed:
+                raise error("Перезапись навыка не разрешена", "Сохрани черновик под новым именем — хозяин посмотрит его в карантине.")
         archive_version(skills, name)
     replace(skills, name, data)
     item = skills.package(name)

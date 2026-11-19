@@ -583,8 +583,10 @@ class Mail:
         if mode in ("important", "all"):
             if mode == "important" and verdict is not None and not v.get("important"):
                 return
-            who = L.get("from_name") or L.get("from_addr") or "?"
-            text = f"📧 {'Важное письмо' if v.get('important') else 'Письмо'} от {who}: «{L.get('subject') or 'без темы'}»" + (f"\n{L['summary']}" if L.get("summary") else "") \
+            # Чужие поля без разметки: «[Банк](https://evil)» в имени не станет ссылкой от бота (охота 19.11)
+            flat = lambda value: str(value).translate(str.maketrans({"[": "［", "]": "］", "(": "（", ")": "）", "*": "∗", "_": "＿", "`": "ʼ", "<": "‹", ">": "›", "~": "∼", "|": "¦"}))
+            who = flat(L.get("from_name") or L.get("from_addr") or "?")
+            text = f"📧 {'Важное письмо' if v.get('important') else 'Письмо'} от {who}: «{flat(L.get('subject') or 'без темы')}»" + (f"\n{flat(L['summary'])}" if L.get("summary") else "") \
                 + ("\nЖдёт ответа." if v.get("needs_reply") else "")
             sid = app.main_session()
             msg = {"role": "event", "kind": "mail", "content": text}  # событие: в модель не уходит, в память не индексируется

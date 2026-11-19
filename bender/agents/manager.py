@@ -347,6 +347,10 @@ class Agents:
                         # Полномочия задач одобрял чужой хозяин: после импорта их выдаёт только наш (охота 16.11).
                         if 'authority' in columns:value['authority']='[]'
                         if 'created_by' in columns:value['created_by']='import'
+                    if table=='tasks':
+                        # Задачи команды из чужого архива не оживают сами с чужими полномочиями (охота 19.11).
+                        if 'status' in value and value['status'] in ('queued','running','waiting'):value['status']='cancelled'
+                        if 'tainted' in value:value['tainted']=1
                     if table=='sessions' and 'meta' in value:
                         value['meta']=dumps({**json.loads(value['meta']), 'home_channel':'pult'})
                     if value:
@@ -366,6 +370,12 @@ class Agents:
                 elif group=='roles':
                     candidates={role:[e for e in chain if e.get('provider') in ctx.models.providers()] for role,chain in changes.items() if isinstance(chain,list)}
                     ctx.settings.set(group,candidates)
+                elif group=='team_roles':
+                    from ..team.roles import validate_roles
+                    try:
+                        validate_roles(changes)
+                        ctx.settings.replace(group,{k:{**v,'enabled':False} for k,v in changes.items()})  # включает хозяин (охота 19.11)
+                    except HumanError:pass
                 else:ctx.settings.replace(group,changes)
             ctx.selfdir.set_identity({'name':name or record['name']})
             ctx.index.rebuild()

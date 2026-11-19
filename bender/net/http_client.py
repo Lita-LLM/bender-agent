@@ -228,9 +228,15 @@ class Response:
         ok = False
         try:
             async for raw in self._raw_chunks():
-                data = self._decoder.decompress(raw) if self._decoder else raw
-                if data:
+                if not self._decoder:
+                    if raw:
+                        yield raw
+                    continue
+                data = self._decoder.decompress(raw, 1 << 20)  # распаковка порциями: gzip-бомба не съедает память разом (охота 19.11)
+                while data:
                     yield data
+                    tail = getattr(self._decoder, "unconsumed_tail", b"")
+                    data = self._decoder.decompress(tail, 1 << 20) if tail else b""
             if self._decoder:
                 tail = self._decoder.flush()
                 if tail:
@@ -240,16 +246,21 @@ class Response:
             self._finish(reusable=ok)
 
     async def iter_lines(self) -> AsyncIterator[str]:
-        buf = b""
+        buf = bytearray()
         async for chunk in self.iter_bytes():
             buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if len(line)>1024*1024:raise NetError("size","Слишком длинная строка ответа",url=self.url)
-                yield line.rstrip(b"\r").decode("utf-8", "replace")
+            start = 0  # строки режутся по индексу, без копирования остатка на каждой (охота 19.11: квадратичный разбор)
+            while True:
+                end = buf.find(b"\n", start)
+                if end < 0:
+                    break
+                if end - start > 1024*1024:raise NetError("size","Слишком длинная строка ответа",url=self.url)
+                yield bytes(buf[start:end]).rstrip(b"\r").decode("utf-8", "replace")
+                start = end + 1
+            del buf[:start]
             if len(buf)>1024*1024:raise NetError("size","Слишком длинная строка ответа",url=self.url)
         if buf:
-            yield buf.rstrip(b"\r").decode("utf-8", "replace")
+            yield bytes(buf).rstrip(b"\r").decode("utf-8", "replace")
 
     async def read(self, limit: int = 256 * 1024 * 1024) -> bytes:
         parts = []

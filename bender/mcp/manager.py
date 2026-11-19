@@ -45,6 +45,9 @@ def hide_args(argv):
             out.append(part.split("=", 1)[0] + "=[скрыто]"); continue
         if part.startswith("-") and SECRET_FLAG.search(part):
             hide = True
+        if not part.startswith("-") and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", part):
+            part = part.split("=", 1)[0] + "=[скрыто]"  # -e TOKEN=… у docker и подобных (охота 19.11)
+        part = re.sub(r"(?<=://)[^/@\s]+@", "[скрыто]@", part)  # postgresql://user:пароль@хост
         out.append(part)
     return out
 
@@ -211,6 +214,8 @@ class Manager:
                         return await self.call(server_id, raw_name, args, ctx)
                     return handler
 
+                if not isinstance(definition.get("inputSchema"), dict):
+                    continue  # подменённый список без схемы не должен ронять менеджер и запуск (охота 19.11)
                 self.app.tools.add(Tool(alias, f"MCP · {sid} · {name}",
                     untrusted(self.app.guard.scrub(f"описание MCP {sid}/{name}"), self.app.guard.scrub(str(definition.get("description") or name))),
                     self.scrub_schema(definition["inputSchema"]), make_handler(sid, name), group="mcp",

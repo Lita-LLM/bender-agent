@@ -22,6 +22,10 @@ def _clip(text: str, limit: int = 30_000) -> str:
     return head + f"\n…[пропущено {len(text) - limit} символов]…\n" + tail
 
 
+import re as _re
+ENV_KEEP = {"SSH_AUTH_SOCK", "XAUTHORITY", "GPG_AGENT_INFO", "SSH_ASKPASS", "GIT_ASKPASS", "SUDO_ASKPASS"}
+SECRETISH = _re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|AUTH|COOKIE|SESSION_KEY", _re.I)
+
 async def start_command(ctx, command, cwd="", allow_net=False, argv=None):
     """Общий запуск коротких и фоновых команд; Prepared живёт до завершения процесса."""
     agent_ctx = ctx.app
@@ -59,7 +63,8 @@ async def start_command(ctx, command, cwd="", allow_net=False, argv=None):
                                allow_net=allow_net, temp_root=agent_ctx.dirs.local, raw_argv=argv)
     if os.name=='nt' and argv and not info.get('windows_job'):
         prepared.argv=argv
-    env = {**os.environ, **prepared.env, "PAGER": "cat", "GIT_PAGER": "cat"}
+    # Токены из окружения Бендера командам не достаются: printenv не должен выдавать ключи мимо Сейфа (охота 19.11).
+    env = {**{k: v for k, v in os.environ.items() if k in ENV_KEEP or not SECRETISH.search(k)}, **prepared.env, "PAGER": "cat", "GIT_PAGER": "cat"}
     kw = {"stdin": asyncio.subprocess.DEVNULL, "stdout": asyncio.subprocess.PIPE,
           "stderr": asyncio.subprocess.STDOUT, "cwd": str(workdir), "env": env}
     if os.name != "nt":
@@ -139,10 +144,23 @@ def register(reg) -> None:
                           data={"code": code, "timed_out": timed_out})
 
 
+NET_TOOLS = _re.compile(r"(?:^|[\s;&|(`])(?:curl|wget|git\s+(?:clone|pull|fetch|ls-remote)|ssh|scp|rsync|nc|ncat|telnet|ftp|http|aria2c|yt-dlp|pip3?\s+download|npm\s+view)\b|https?://", _re.I)
+
+
+def _net_closed(agent_ctx) -> bool:
+    try:
+        info = sandbox.for_app(agent_ctx)
+        return bool(sandbox.confined(info, False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _reads_untrusted(agent_ctx, command: str, workdir, allow_net: bool) -> bool:
     """Вывод команды — чужой текст, если она ходила в сеть или трогала входящие файлы (как read_file). Охота 16.11."""
     if allow_net:
         return True
+    if NET_TOOLS.search(command) and not _net_closed(agent_ctx):
+        return True  # сеть не закрыта песочницей — curl/git без allow_net всё равно приносит чужой текст (охота 19.11)
     from pathlib import Path
 
     from ..channels.media import untrusted

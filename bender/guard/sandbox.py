@@ -178,7 +178,10 @@ class Prepared:
         self.job = None
         self.env = {}
         self.argv = wrap(command, info=info, work_dir=work_dir, allow_net=allow_net, cwd=cwd, read_dirs=read_dirs)
-        if not info.get('owner_process') and info.get('kind')=='bwrap':self.env['DBUS_SESSION_BUS_ADDRESS']=''  # шина спрятана, адрес тоже
+        if not info.get('owner_process') and info.get('kind')=='bwrap':
+            self.env['DBUS_SESSION_BUS_ADDRESS']=''  # шина спрятана, адрес тоже
+            if allow_net:  # общая сеть открывает абстрактные сокеты X11/D-Bus: экран хозяина не для команды (охота 19.11)
+                self.env.update(DISPLAY='',XAUTHORITY='',WAYLAND_DISPLAY='')
         if not info.get('ssh') and not info.get('owner_process'):self.env['SSH_AUTH_SOCK']=''
         elif info.get('ssh_auth_sock'):
             from ..core.pathutil import canonical

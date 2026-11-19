@@ -41,6 +41,8 @@ REASONS = {
 }
 
 
+MAX_CONNECTIONS = 256
+
 class Headers:
     """Заголовки без учёта регистра имён, с сохранением порядка и повторов."""
 
@@ -411,8 +413,8 @@ class HttpServer:
 
     def _accept(self, reader, writer):
         # Регистрируем до первого await: отмена ещё не начавшейся _handle иначе теряла сокет.
-        if self._stopping:
-            writer.close()
+        if self._stopping or len(self._writers) >= MAX_CONNECTIONS:
+            writer.close()  # предел одновременных соединений: тело читается до проверок, поток соединений съедал память (охота 19.11)
             return
         self._writers.add(writer)
         task=asyncio.create_task(self._handle(reader,writer))

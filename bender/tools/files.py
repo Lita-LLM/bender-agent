@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+import asyncio
 
 import fnmatch
 import os
@@ -208,13 +209,18 @@ def register(reg) -> None:
                 continue
             if _is_binary(data):
                 continue
-            for i, ln in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
-                if rx.search(ln):
-                    rel = f.name if root.is_file() else str(f.relative_to(root))
-                    tainted=tainted or untrusted(ctx.app,f)
-                    hits.append(f"{rel}:{i}: {ln[:300]}")
-                    if len(hits) >= 300:
-                        break
+            def scan(text, room):  # шаблон модели — в потоке: катастрофический регэксп не замораживает цикл событий (охота 19.11)
+                found = []
+                for i, ln in enumerate(text.splitlines(), 1):
+                    if rx.search(ln):
+                        found.append((i, ln[:300]))
+                        if len(found) >= room:
+                            break
+                return found
+            for i, ln in await asyncio.to_thread(scan, data.decode("utf-8", "replace"), 300 - len(hits)):
+                rel = f.name if root.is_file() else str(f.relative_to(root))
+                tainted=tainted or untrusted(ctx.app,f)
+                hits.append(f"{rel}:{i}: {ln}")
             if len(hits) >= 300:
                 break
         note = f"\n…[закрытых файлов пропущено: {skipped}]" if skipped else ""

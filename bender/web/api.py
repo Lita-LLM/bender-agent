@@ -2042,7 +2042,13 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
             agent_id = req.headers.get('x-bender-agent') or req.q('agent') or 'main'
             ctx = host_app.agents.get(agent_id)
             active_token = ACTIVE.set(ctx)
-            return await r(req)
+            resp = await r(req)
+            try:  # пульт не встраивается в чужие страницы: щелчок по карточке одобрения через рамку (охота 19.11)
+                resp.headers.set("X-Frame-Options", "SAMEORIGIN")
+                if "content-security-policy" not in resp.headers:resp.headers.add("Content-Security-Policy", "frame-ancestors 'self'")
+            except Exception:  # noqa: BLE001 — потоковые и особые ответы оставляем как есть
+                pass
+            return resp
         except HumanError as e:
             return error_response(e)
         except Exception as e:  # noqa: BLE001

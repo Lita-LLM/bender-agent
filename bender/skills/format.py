@@ -113,7 +113,10 @@ def strip_comment(line):
 def header(lines):
     """Блочные словари/списки; многострочные flow-значения собираются вместе."""
     def flow(value, index, indent):
+        start = index
         while True:
+            if index - start > 200:
+                raise bad("Слишком длинное многострочное значение шапки.")  # разбор квадратичный — длинный хвост вешал цикл (охота 19.11)
             try:
                 split_flow(value)
                 return value, index

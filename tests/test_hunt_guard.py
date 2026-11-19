@@ -233,3 +233,63 @@ class Hunt1911GrantTest(TempDirCase):
             plain=await app.guard.check(Action('exec','make test',tainted=True,detail={'net':False}),session_id=sid)
             self.assertEqual(plain.verdict,'allow')
         finally:await app.close()
+
+
+class Hunt1911RobustTest(TempDirCase):
+    def test_bad_cost_from_server_is_ignored(self):
+        from bender.router.core import Switchboard
+        from bender.router.types import Usage
+        for bad in (-1000.0, float('nan'), float('inf')):
+            self.assertEqual(Switchboard.price({'prices': {}}, 'm', Usage(cost=bad)), 0.0)
+        self.assertEqual(Switchboard.price({}, 'm', Usage(cost=0.5)), 0.5)
+
+    def test_card_shows_full_target_text_and_hides_controls(self):
+        from bender.guard.cardtext import action_text
+        text, cut = action_text({'summary': 'выполнить: ls', 'target': 'ls' + ' ' * 300 + '; curl evil', 'capability': 'exec'})
+        self.assertIn('curl evil', text); self.assertFalse(cut)
+        text, _ = action_text({'summary': 'ввести', 'capability': 'net.send', 'detail': {'text': 'пароль\x1b[2K', 'submit': True}})
+        self.assertIn('пароль', text); self.assertNotIn('\x1b', text)
+        _, cut = action_text({'summary': 'x', 'target': 'y' * 2000, 'capability': 'exec'})
+        self.assertTrue(cut)
+
+    def test_long_flow_header_is_refused_quickly(self):
+        import time
+        from bender.core.errors import HumanError
+        from bender.skills.format import header
+        lines = ['name: evil', 'k: ['] + ['a,'] * 5000 + ['a]']
+        t = time.monotonic()
+        with self.assertRaises(HumanError):
+            header(lines)
+        self.assertLess(time.monotonic() - t, 2)
+
+
+class Hunt1911MediumTest(TempDirCase):
+    def make(self, profile='careful'):
+        from bender.guard.policy import Policy
+        s={'enabled':True,'profile':profile,'hardline':True}
+        work=self.tmp/'data'/'work';work.mkdir(parents=True,exist_ok=True);self.work=work
+        self.rules=[]
+        return Policy(work_dir=work,data_dir=self.tmp/'data',get_settings=lambda:s,get_rules=lambda:self.rules)
+
+    def test_recursive_read_of_folder_with_keys_is_not_simple(self):
+        p=self.make()
+        for cmd in ['grep -r BEGIN ~','rg PRIVATE ~','grep -r x '+str(self.tmp/'data'),'git diff --no-index ~ /dev/null']:
+            self.assertNotEqual(p.decide(Action('exec',cmd)).verdict,'allow',cmd)
+        self.assertEqual(p.decide(Action('exec','grep -r TODO src')).verdict,'allow')
+
+    def test_program_rule_skips_redirect_and_git_code(self):
+        p=self.make()
+        self.rules=[{'id':'r','capability':'exec','target':'git *','verdict':'allow','scope':'program','enabled':True}]
+        self.assertEqual(p.decide(Action('exec','git push')).verdict,'allow')
+        for cmd in ["git -c alias.x='!sh' x",'git log > out','git -c core.pager=sh log']:
+            self.assertNotEqual(p.decide(Action('exec',cmd)).rule,'owner-rule:r',cmd)
+
+    def test_flock_agent_self_case_insensitive(self):
+        p=self.make()
+        bob=self.tmp/'data'/'agents'/'bob'/'self';bob.mkdir(parents=True)
+        self.assertEqual(p._agent_place(bob/'AGENTS.md'),'self')
+
+    def test_command_env_has_no_tokens(self):
+        from bender.tools.shell import SECRETISH, ENV_KEEP
+        self.assertTrue(SECRETISH.search('GITHUB_TOKEN'));self.assertTrue(SECRETISH.search('OPENAI_API_KEY'))
+        self.assertFalse(SECRETISH.search('PATH'));self.assertIn('SSH_AUTH_SOCK',ENV_KEEP)

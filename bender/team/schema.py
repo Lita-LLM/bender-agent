@@ -79,5 +79,7 @@ def harmless(value, schema: dict | None = None) -> bool:
         return all(harmless(v, item) for v in value)
     if isinstance(value, dict):
         props = (schema or {}).get("properties") or {}
+        if any(k not in props for k in value):
+            return False  # указание можно спрятать и в имени поля (охота 19.11)
         return all(harmless(v, props.get(k) if isinstance(props.get(k), dict) else None) for k, v in value.items())
     return False

@@ -533,7 +533,10 @@ class Switchboard:
     @staticmethod
     def price(provider: dict, model: str, usage: Usage) -> float:
         if usage.cost is not None:
-            return float(usage.cost)
+            import math
+            cost = float(usage.cost)
+            if math.isfinite(cost) and 0 <= cost <= 1000:  # отрицательная/NaN цена от сервера выключала бюджет (охота 19.11)
+                return cost
         if provider.get("free") or provider.get("is_local") or provider.get("subscription"):
             return 0.0  # подписка оплачена отдельно — ход денег не стоит
         prices = (provider.get("prices") or {}).get(model) or {}

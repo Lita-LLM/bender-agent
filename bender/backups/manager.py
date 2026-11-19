@@ -85,6 +85,8 @@ def read_json(path):
         raise HumanError('backup_manifest', 'Не удалось прочитать опись бекапа', 'Проверь носитель и выбери целую копию снимка.', detail=str(exc)) from None
 
 
+RESTORED_MARK = '.bender-restored'
+
 class Backups:
     def __init__(self, app):
         self.app = app
@@ -340,7 +342,8 @@ class Backups:
                 if alias in aliases or len(files) >= 100000:
                     raise error('Имена файлов неоднозначны для переносимого бекапа или их слишком много', 'Разведи имена, различающиеся лишь регистром/Unicode, или раздели набор данных. Предел — 100000 файлов.')
                 aliases.add(alias)
-                if rel in ('bender.db-wal', 'bender.db-shm') or (rel in ('secrets.json', 'local/web_token') and not cfg['include_secrets']):
+                private = rel in ('secrets.json', 'local/web_token') or rel.rsplit('/', 1)[-1] == 'secrets.json' or rel.startswith('local/browser/')
+                if rel in ('bender.db-wal', 'bender.db-shm') or (private and not cfg['include_secrets']):  # копии сейфа и cookie браузера тоже (охота 19.11)
                     continue
                 if any(parent.is_symlink() for parent in path.parents):
                     raise error('Данные заменены ссылкой во время копирования')
@@ -519,6 +522,7 @@ class Backups:
                         for key, version in db.execute("SELECT key,value FROM meta WHERE key LIKE 'schema:%'"):
                             if self.app.store.meta_get(key, None) is not None and int(json.loads(version)) > int(self.app.store.meta_get(key)):
                                 raise error('Схема старого формата новее работающей программы')
+            (stage / RESTORED_MARK).write_text('Восстановленный слот Бендера: агенту закрыт, как живые данные.\n', encoding='utf-8')
             if target.exists():
                 target.rmdir()
             os.replace(stage, target)

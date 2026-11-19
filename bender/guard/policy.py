@@ -83,6 +83,7 @@ def leaks(a) -> bool:
 
 
 CHAIN = re.compile(r"[;&|`\n]|\$\(")  # команда из нескольких: правило «программа» на неё не распространяется
+GIT_CODE = re.compile(r"(?:^|\s)(?:-c|--config(?:-env)?|--upload-pack|--receive-pack|--exec(?:-path)?|-u)(?:\s|=|$)|alias\.|core\.(?:pager|editor|fsmonitor|sshcommand|hookspath)", re.I)
 IRREVERSIBLE = {"money", "self.code", "self.rules"}
 
 
@@ -259,6 +260,9 @@ class Policy:
                 return f"защищённое место: {a}"
         if any(part.casefold() == "bender-backups" for part in path.parts):  # тома без учёта регистра (охота 19.11)
             return "копии данных Бендера (сейф, токены, база) — только через раздел «Бекапы»"
+        for parent in list(path.parents)[:8]:
+            if (parent / ".bender-restored").is_file():  # восстановленный из бекапа слот вне папки данных (охота 19.11)
+                return "восстановленные данные Бендера (сейф, база) — открой их запуском bender --data"
         for name in ("secrets.json", "bender.db", "bender.db-wal", "bender.db-shm", "local", "skills", "modules", "imports", "diary/hermes", "diary/claude", "versions", "workshop", "exams"):
             if _is_within(path, self.data_dir / name):
                 return "служебные данные Бендера (сейф, база, ключи) — только через свои тулы"
@@ -267,9 +271,24 @@ class Policy:
     def _reads_protected(self, command: str) -> bool:
         """`cat ~/.ssh/id_rsa` — «простое чтение», но защищённого места: без песочницы так не пускаем (охота 16.11)."""
         try:
-            words = shlex.split(command)[1:]
+            parts = shlex.split(command)
         except ValueError:
             return True
+        words = parts[1:]
+        prog = os.path.basename(parts[0]) if parts else ""
+        # Рекурсивное чтение папки, внутри которой ключи или данные Бендера (grep -r ~, rg … ~): охота 19.11
+        recursive = prog in ("rg", "ag", "tree") or (prog == "grep" and any(w == "--recursive" or w.startswith("--directories") or (w.startswith("-") and not w.startswith("--") and ("r" in w or "R" in w)) for w in words)) \
+            or (prog == "git" and "--no-index" in words) or (prog == "du" and any(w.startswith("-") and "a" in w for w in words))
+        if recursive:
+            for w in words:
+                if w.startswith("-"):
+                    continue
+                try:
+                    folder = self.resolve(w)
+                except Exception:  # noqa: BLE001
+                    return True
+                if _is_within(self.data_dir, folder) or any(_is_within((HOME / rel), folder) for rel in PROTECTED_HOME):
+                    return True
         for w in words:
             if w.startswith("-") and "=" in w:
                 w = w.split("=", 1)[1]
@@ -288,9 +307,8 @@ class Policy:
         agents = self.data_dir / "agents"
         try:
             if _is_within(path, agents):
-                rel = path.relative_to(agents) if path.is_relative_to(agents) else None
-                if rel and rel.parts:
-                    roots.append(agents / rel.parts[0])
+                # без строкового is_relative_to: на томах без учёта регистра «Agents/Bob» — тот же агент (охота 19.11)
+                roots += [child for child in agents.iterdir() if child.is_dir() and _is_within(path, child)]
         except (OSError, ValueError):
             pass
         for root in roots:
@@ -313,8 +331,8 @@ class Policy:
             pat = r.get("target") or "*"
             if not _matches(a.target, pat) and not (a.capability.startswith("fs.") and r.get("scope") and _matches(str(self.resolve(a.target)), pat)):
                 continue
-            if r.get("scope") == "program" and CHAIN.search(a.target):
-                continue
+            if r.get("scope") == "program" and (CHAIN.search(a.target) or re.search(r"[<>]", a.target) or GIT_CODE.search(a.target)):
+                continue  # «всегда git» не покрывает перенаправления и git -c alias.x='!…' (охота 19.11)
             if r.get("actor") and r["actor"] != a.actor:
                 continue
             if r.get("only_clean") and a.tainted:

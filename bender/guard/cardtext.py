@@ -37,6 +37,8 @@ def action_text(card: dict, limit: int = LIMIT) -> tuple[str, bool]:
             if len(raw) >= 2000:
                 parts.append('')  # аргументы уже урезаны при записи — полностью только в пульте
                 card = {**card, 'target': 'x' * 2000}
+    if isinstance(detail.get('text'), str) and detail['text']:
+        parts.append('Текст: ' + visible(detail['text']) + (' (и отправить)' if detail.get('submit') else ''))  # browser_type (охота 19.11)
     text = '\n'.join(p for p in parts if p)
     truncated = len(text) > limit or len(str(card.get('target') or '')) >= 2000
     if len(text) > limit:
