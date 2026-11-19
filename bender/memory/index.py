@@ -227,6 +227,9 @@ class MemoryIndex:
                 h = c.hash
                 if h in old:
                     keep.add(old[h])
+                    # Текст тот же, а метки сменились (важность, источник, триггеры): обновить на месте, вектор сохраняется (охота 19.11)
+                    db.execute("UPDATE mem_chunks SET ts=?, provenance=?, importance=?, triggers=? WHERE id=?",
+                               (c.ts, c.provenance, c.importance, ",".join(c.triggers), old[h]))
                     continue
                 cur = db.execute("INSERT INTO mem_chunks(doc_id, kind, ref, text, ts, provenance, importance, triggers, hash) VALUES(?,?,?,?,?,?,?,?,?)",
                                  (doc_id, kind, c.ref, c.text, c.ts, c.provenance, c.importance, ",".join(c.triggers), h))
@@ -256,7 +259,10 @@ class MemoryIndex:
         doc = self._doc(key, kind, str(path), title)
         if doc["stamp"] == stamp:
             return 0
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:  # папка с именем x.md или файл пропал между stat и чтением: recall не падает (охота 19.11)
+            return 0
         ts = default_ts or _day_ts(path) or st.st_mtime
         n = self._replace_chunks(doc["id"], kind, parse_md(text, default_ts=ts, default_provenance=provenance))
         self.store.x("UPDATE mem_docs SET stamp = ?, updated = ? WHERE id = ?", (stamp, time.time(), doc["id"]))
@@ -387,7 +393,9 @@ class MemoryIndex:
                sync: bool = True, qvec: list[float] | None = None) -> list[Hit]:
         if sync:
             self.sync()
+        narrow = bool(since) or bool(kinds)
         kinds = kinds or ("diary", "session", "fact", "note")
+        wide = 400 if narrow else 60  # фильтры kinds/since идут позже: с узким поиском топ-60 мог быть весь чужой (охота 19.11)
         ranks: dict[int, float] = {}
         why: dict[int, list[str]] = {}
 
@@ -400,13 +408,13 @@ class MemoryIndex:
             q = self._fts_query(query)
             if q:
                 try:
-                    add([r[0] for r in self.store.q("SELECT rowid FROM mem_fts WHERE mem_fts MATCH ? ORDER BY bm25(mem_fts) LIMIT 60", (q,))], "слова")
+                    add([r[0] for r in self.store.q("SELECT rowid FROM mem_fts WHERE mem_fts MATCH ? ORDER BY bm25(mem_fts) LIMIT ?", (q, wide))], "слова")
                 except sqlite3.OperationalError:
                     pass
             tq = self._tri_query(query)
             if tq:
                 try:
-                    add([r[0] for r in self.store.q("SELECT rowid FROM mem_tri WHERE mem_tri MATCH ? ORDER BY bm25(mem_tri) LIMIT 40", (tq,))], "части слов", 0.6)
+                    add([r[0] for r in self.store.q("SELECT rowid FROM mem_tri WHERE mem_tri MATCH ? ORDER BY bm25(mem_tri) LIMIT ?", (tq, wide * 2 // 3))], "части слов", 0.6)
                 except sqlite3.OperationalError:
                     pass
         else:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -68,6 +69,14 @@ def stock_espeak(python):
     return path
 
 
+import threading
+_PREPARE=threading.Lock()
+
+
+def locked(fn):
+    """Одна установка за раз: installed.json и общий словарь espeak правят два голоса одновременно (охота 19.11)."""
+    with _PREPARE:return fn()
+
 def problem(title,detail=''):
     return HumanError('local_voice',title,'Проверь сеть, свободное место и Python 3.10+; затем повтори bender voice install.',detail=detail)
 
@@ -80,7 +89,7 @@ def metadata(repo):
         value=json.loads(raw)
         if not re.fullmatch('[0-9a-f]{40,64}',value.get('sha','')):raise ValueError('Нет commit моделей')
         return value
-    except (OSError,ValueError,TypeError) as error:raise problem('Не удалось получить проверяемый список моделей Hugging Face',type(error).__name__) from None
+    except (OSError,ValueError,TypeError,AttributeError,http.client.HTTPException) as error:raise problem('Не удалось получить проверяемый список моделей Hugging Face',type(error).__name__) from None
 
 
 def model_files(info,kind,voice=DEFAULT):
@@ -136,7 +145,7 @@ def download(item,target):
         if not matches(temporary):raise ValueError('Хеш не совпал')
         os.replace(temporary,target)
         return True
-    except (OSError,ValueError) as error:raise problem('Модель не прошла загрузку или проверку хеша',type(error).__name__) from None
+    except (OSError,ValueError,http.client.HTTPException) as error:raise problem('Модель не прошла загрузку или проверку хеша',type(error).__name__) from None  # обрыв чтения — HTTPException (охота 19.11)
     finally:
         if temporary.exists():temporary.unlink()
 
@@ -220,7 +229,7 @@ async def install(app,*,agent=None,voice=DEFAULT,service=True):
         if not token_path.exists():atomic_write(token_path,secrets.token_urlsafe(32).encode())
         token_path.chmod(0o600)
         return token_path.read_text().strip(),reused,downloaded,main
-    token,reused,downloaded,main=await asyncio.to_thread(prepare)
+    token,reused,downloaded,main=await asyncio.to_thread(locked,prepare)
     config=root.settings.group('voice_local');port=config['port']
     provider=next((p for p in root.models.providers().values() if p.get('preset')=='local_voice'),None)
     if provider is None:provider=root.models.add_provider(preset='local_voice',base_url='http://127.0.0.1:'+str(port)+'/v1',api_key=token,extra={'models':[{'id':'gigaam-v3-e2e-ctc','audio_role':'ears'},{'id':'piper-ru','audio_role':'voice'}]})
@@ -273,5 +282,5 @@ async def add_voice(app,voice):
         main=state.get('voice') if state.get('voice') in voices else voice
         state.update(voices=voices,voice=main,tts_file=voices[main]['tts_file'],espeak_dir=voices[main]['espeak_dir'])
         atomic_write(folder/'installed.json',json.dumps(state,ensure_ascii=False,indent=2).encode())
-    await asyncio.to_thread(prepare)
+    await asyncio.to_thread(locked,prepare)
     return {'voice':voice,'downloaded':True}

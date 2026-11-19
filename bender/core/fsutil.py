@@ -70,6 +70,10 @@ def atomic_write(path: Path | str, data: bytes, *, durable: bool = True) -> None
             f.flush()
             if durable:
                 os.fsync(f.fileno())
+        try:  # права перезаписываемого файла сохраняются (unit systemd, общий конфиг), охота 19.11
+            if path.exists():os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        except OSError:
+            pass
         _with_retry(os.replace, tmp, path)
     except BaseException as exc:
         try:

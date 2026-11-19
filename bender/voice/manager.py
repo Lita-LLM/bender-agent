@@ -73,6 +73,8 @@ class Voice:
         raw=result.pop('raw')
         if not raw:
             raise error('Провайдер вернул пустое аудио')
+        if fmt=='wav' and not raw.startswith(b'RIFF'):
+            raise error('Провайдер не вернул WAV')  # mp3 под видом wav колонка не играет; следующий формат будет испробован (охота 19.11)
         if fmt=='opus' and not (raw.startswith(b'OggS') and b'OpusHead' in raw[:4096]):
             raise error('Провайдер не вернул OGG/Opus', 'Telegram получит текст. Перекодирование и ffmpeg не требуются ядру.')
         return {**result,'audio':raw,'mime':result.pop('audio_mime',FORMATS[fmt])}

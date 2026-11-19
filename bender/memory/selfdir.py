@@ -153,8 +153,8 @@ class SelfDir:
 
     def read(self, name: str) -> str:
         try:
-            return (self.root / name).read_text(encoding="utf-8")
-        except FileNotFoundError:
+            return (self.root / name).read_text(encoding="utf-8", errors="replace")  # битый байт не валит старт (охота 19.11)
+        except (FileNotFoundError, IsADirectoryError):
             return ""
 
     def write(self, name: str, text: str) -> None:
@@ -191,9 +191,27 @@ class SelfDir:
         cur = self.identity()
         cur.update({k: v for k, v in fields.items() if v})
         names = [("name", "Имя"), ("creature", "Существо"), ("vibe", "Вайб"), ("emoji", "Эмодзи"), ("avatar", "Аватар")]
-        lines = ["# IDENTITY.md — кто я", ""] + [f"- {title}: {cur.get(k, '')}".rstrip() for k, title in names]
-        extra = self._identity_tail()
-        self.write("IDENTITY.md", "\n".join(lines) + ("\n\n" + extra if extra else "") + "\n")
+        text = self.read("IDENTITY.md")
+        if not text.strip():
+            lines = ["# IDENTITY.md — кто я", ""] + [f"- {title}: {cur.get(k, '')}".rstrip() for k, title in names]
+            self.write("IDENTITY.md", "\n".join(lines) + "\n")
+            return
+        # Поля меняются на месте; свои строки хозяина (тема, заметки, абзацы) остаются (охота 19.11).
+        lines = text.split("\n")
+        done = set()
+        for i, ln in enumerate(lines):
+            m = re.match(r"\s*[-*]\s*\**([^:*]+?)\**\s*:", ln)
+            key = {"имя": "name", "name": "name", "существо": "creature", "creature": "creature", "вайб": "vibe", "vibe": "vibe",
+                   "эмодзи": "emoji", "emoji": "emoji", "аватар": "avatar", "avatar": "avatar"}.get(m.group(1).strip().lower()) if m else None
+            if key and key not in done:
+                title = dict(names)[key]
+                lines[i] = f"- {title}: {cur.get(key, '')}".rstrip()
+                done.add(key)
+        missing = [f"- {title}: {cur.get(k, '')}".rstrip() for k, title in names if k not in done]
+        if missing:
+            at = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("#")), 0)
+            lines[at:at] = ([""] if at else []) + missing
+        self.write("IDENTITY.md", "\n".join(lines).rstrip("\n") + "\n")
 
     def _identity_tail(self) -> str:
         text = self.read("IDENTITY.md")

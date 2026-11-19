@@ -80,12 +80,14 @@ class FaultTest(TempDirCase):
     def test_corrupt_boot_refuses_without_restart_or_overwrite(self):
         from bender.core.watchdog import Watchdog,load_boot
         path=self.tmp/'local'/'boot.txt';path.parent.mkdir()
-        for raw in (b'garbage',b'starts\tnan\n',b'safe\tbad\n',b'slots.timeout\tbad\n',b'slots.nonce\t123\n',b'\xff',b''):
+        for raw in (b'garbage',b'starts\tnan\n',b'safe\tbad\n',b'slots.timeout\tbad\n',b'slots.nonce\t123\n',b'\xff'):
             path.write_bytes(raw)
             self.assertTrue(load_boot(self.tmp).get('_error'))
             watcher=Watchdog(self.tmp,["unused"],out=lambda text:None)
             self.assertEqual(watcher.run(),78)
             self.assertEqual(path.read_bytes(),raw)
+        path.write_bytes(b'')  # пустой файл после обрыва питания — «состояния нет», автозапуск жив (охота 19.11)
+        self.assertFalse(load_boot(self.tmp).get('_error'))
 
     @async_test
     async def test_limits_helper_in_tmp_survives_private_tmp_mount(self):

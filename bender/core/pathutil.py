@@ -27,6 +27,11 @@ def _probe_file(prefix, folder):
 def safe_name(raw, *, portable=False):
     """Не допускаем неоднозначные имена Win32 даже в пакете, собранном на Linux."""
     raw = os.fspath(raw)
+    if os.name != "nt" and not portable:
+        # Правила Win32 (двоеточие, ?, nul.txt, точка в конце) на Linux/macOS не нужны: «log-12:30.txt» — обычный файл (охота 19.11)
+        if not raw or "\0" in raw:
+            raise HumanError("path_alias", "Неоднозначный или опасный путь", "Путь пустой или содержит нулевой символ.", detail=raw)
+        return raw
     drive, tail = ntpath.splitdrive(raw)
     bad = not raw or "\0" in raw or raw.startswith(("\\\\", "//"))
     if drive and (portable or os.name != "nt" or len(drive) != 2 or drive[1] != ":"):

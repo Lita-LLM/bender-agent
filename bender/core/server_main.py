@@ -214,6 +214,8 @@ def run(args) -> int:
         code = asyncio.run(serve(args, term))
     except HumanError as e:
         term.error(e)
+        if e.code in ('database_open','database_write'):
+            return EXIT_CRASH  # база занята или диск на секунду недоступен — перезапуск лечит (охота 19.11)
         return EXIT_CONFIG  # Сторож не будет перезапускать: ошибку настройки перезапуск не лечит
     except KeyboardInterrupt:
         code = 0

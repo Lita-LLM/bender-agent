@@ -76,7 +76,7 @@ def load_boot(data_dir) -> dict:
         return {'_error':'Не читается local/boot.txt. Проверь права и восстанови целую копию; файл не перезаписан.'}
     except UnicodeDecodeError:
         return {'_error':'Не читается local/boot.txt. Проверь права и восстанови целую копию; файл не перезаписан.'}
-    invalid = not bool(lines)
+    invalid = False  # пустой файл — «состояния нет», а не повреждение (обрыв питания на телефоне), охота 19.11
     for ln in lines:
         key, tab, raw = ln.partition("\t")
         if not tab or not key:
@@ -117,8 +117,10 @@ def _raw(v) -> str:
 def save_boot(data_dir, data: dict) -> bool:
     """Записать состояние. Не вышло (папка данных сломана) — Сторож всё равно работает дальше."""
     lines = []
+    if data.get("_error"):
+        return False  # повреждённый файл не перезаписываем: обещано в сообщении (охота 19.11)
     for k, v in data.items():
-        if v is None:
+        if v is None or str(k).startswith("_"):
             continue
         if isinstance(v, dict):
             lines += [f"{k}.{sk}\t{_raw(sv)}" for sk, sv in v.items() if sv is not None]
@@ -127,9 +129,12 @@ def save_boot(data_dir, data: dict) -> bool:
     p = boot_path(data_dir)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p + ".tmp", "w", encoding="utf-8") as f:
+        tmp = p + "." + str(os.getpid()) + ".tmp"  # Сторож и ядро пишут одновременно — у каждого свой временный файл
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
-        os.replace(p + ".tmp", p)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
         return True
     except OSError:
         return False

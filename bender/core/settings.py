@@ -660,7 +660,11 @@ class Settings:
             schema = SCHEMA.get(group)
             if schema:
                 for field in schema.fields:
-                    if field.key in data:data[field.key] = _coerce(field, data[field.key])
+                    if field.key not in data:continue
+                    try:data[field.key] = _coerce(field, data[field.key])
+                    except (ValueError, TypeError, HumanError):
+                        # значение из более новой версии (откат слота) или вне новой схемы: умолчание вместо отказа запуска (охота 19.11)
+                        data.pop(field.key)
         except (ValueError, TypeError, HumanError) as exc:
             raise HumanError('settings_corrupt', 'Повреждены настройки группы «'+group+'»', 'Исходные данные сохранены. Проверь doctor и восстанови настройки из бекапа.', detail=str(exc)) from None
         if not inside:self._cache[group] = data

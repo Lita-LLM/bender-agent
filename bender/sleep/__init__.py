@@ -231,8 +231,11 @@ class Sleep:
             night.status = "error"
             night.errors.append(_err(e))
             raise
+        except BaseException:
+            night.status = "interrupted"  # остановка посреди сна: ночь не отработана (охота 19.11)
+            raise
         finally:
-            if not dry:
+            if not dry and night.status != "interrupted":
                 self.tried(night.status)
             try:
                 if agent_ctx.agent_id == 'main' and not dry and agent_ctx.settings.get('updates', 'auto', 'notify') == 'night' and not agent_ctx.guard.halted:
@@ -384,9 +387,9 @@ class Sleep:
                 if not night.dry:
                     sd.write(name, new)
                 night.promoted.append({"text": text, "to": name})
-            if not night.dry:
+            if not night.dry and night.dream:  # сон не удался — кандидатов не списываем (охота 19.11)
                 agent_ctx.index.mark_promoted([u["th"] for u in night.material.get("useful") or []])
-        if agent_ctx.settings.get("sleep", "tidy", True) and not self.tidy_pending():
+        if agent_ctx.settings.get("sleep", "tidy", True) and not self.tidy_fresh():
             fat = [name for name in ("MEMORY.md", "USER.md") if self.fat(name)]
             if fat:
                 try:
@@ -406,6 +409,16 @@ class Sleep:
     def tidy_pending(self) -> dict | None:
         p = self.app.store.meta_get("sleep:tidy")
         return p if isinstance(p, dict) and p.get("items") else None
+
+    def tidy_fresh(self) -> dict | None:
+        """Предложение, которое ещё можно применить: устаревшее по хешу файла не мешает новому (охота 19.11)."""
+        prop = self.tidy_pending()
+        if not prop:
+            return None
+        for name, digest in (prop.get("files") or {}).items():
+            if hashlib.sha256(self.app.selfdir.read(name).encode()).hexdigest() != digest:
+                return None
+        return prop
 
     async def propose_tidy(self, names=("MEMORY.md", "USER.md"), reason: str = "хозяин попросил", *, ask=None, store: bool = True) -> dict | None:
         """Модель называет номера лишних записей и склейки; код собирает предложение. Ничего не пишет в ядро:
@@ -470,13 +483,14 @@ class Sleep:
             raise HumanError("tidy_gone", "Этого предложения уже нет", "Обнови экран или попроси уборку заново.", status=409)
         chosen = [it for it in prop["items"] if keys is None or it["k"] in set(keys)]
         done = 0
+        for name, digest in prop["files"].items():  # сначала проверить все файлы: иначе первый записан, второй устарел (охота 19.11)
+            if any(it["file"] == name for it in chosen) and hashlib.sha256(agent_ctx.selfdir.read(name).encode()).hexdigest() != digest:
+                raise HumanError("tidy_stale", f"{name} изменился после предложения", "Попроси уборку заново — предложение пересоберётся по свежему файлу.", status=409)
         for name, digest in prop["files"].items():
             mine = [it for it in chosen if it["file"] == name]
             if not mine:
                 continue
             cur = agent_ctx.selfdir.read(name)
-            if hashlib.sha256(cur.encode()).hexdigest() != digest:
-                raise HumanError("tidy_stale", f"{name} изменился после предложения", "Попроси уборку заново — предложение пересоберётся по свежему файлу.", status=409)
             lines = cur.split("\n")
             gone, put = set(), {}
             for it in mine:
@@ -565,11 +579,14 @@ class Sleep:
                     night.errors.append("склейка навыков: " + _err(exc))
         old = time.time() - OLD_SERVICE_DAYS * 86400
         ids = [r["id"] for r in agent_ctx.store.q("SELECT id FROM sessions WHERE kind IN ('heartbeat', 'cron') AND updated_at < ?", (old,))]
-        if ids:
-            marks = ",".join("?" * len(ids))
+        for start in range(0, len(ids), 500):  # пачками: тысячи старых сессий давали «too many SQL variables» (охота 19.11)
+            part = ids[start:start + 500]
+            marks = ",".join("?" * len(part))
             with agent_ctx.store.tx() as db:
-                db.execute(f"DELETE FROM messages WHERE session_id IN ({marks})", ids)
-                db.execute(f"DELETE FROM sessions WHERE id IN ({marks})", ids)
+                db.execute(f"DELETE FROM messages WHERE session_id IN ({marks})", part)
+                db.execute(f"DELETE FROM sessions WHERE id IN ({marks})", part)
+            for sid in part:
+                agent_ctx.index.drop("session:" + sid)  # recall не ведёт в удалённый разговор
         c["old_service_sessions"] = len(ids)
         try:
             c.update({k: v for k, v in (await asyncio.to_thread(agent_ctx.housekeeping)).items()})

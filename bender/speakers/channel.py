@@ -407,7 +407,13 @@ class Station:
         if not speech:
             return
         url = await self.owner.voice(ctx, sid, speech)
-        await self.link.send(api.VA_ANNOUNCE_REQ, api.encode((1, url), (2, speech), (4, bool(self.card) or follow(cfg, speech))))
+        link = self.link  # пока шла озвучка, колонка могла отключиться (охота 19.11)
+        if link is None:
+            raise failed('Колонка «' + self.cfg['name'] + '» отключилась', 'Проверь её в Связях → Колонки.')
+        try:
+            await link.send(api.VA_ANNOUNCE_REQ, api.encode((1, url), (2, speech), (4, bool(self.card) or follow(cfg, speech))))
+        except (OSError, ConnectionError) as exc:
+            raise failed('Колонка «' + self.cfg['name'] + '» оборвала связь', str(exc)[:200]) from None
         self.last = time.time()
 
 
@@ -436,6 +442,9 @@ class Speakers:
 
     def start(self):
         self.runtime = True
+        cfg = self.settings()
+        if not hasattr(self, 'media_cfg'):
+            self.media_cfg = (cfg['media_address'], cfg['media_port'])  # иначе первая смена порта раздачи не замечалась (охота 19.11)
         if getattr(self.app, '_closed', False) or self.app.safe or not self.settings()['enabled']:
             return
         for cfg in stations(self.settings()):
@@ -473,6 +482,8 @@ class Speakers:
         if getattr(self.app, '_closed', False) or not self.runtime:
             return
         if self.restarting and not self.restarting.done():
+            # правка пришла во время перезапуска: применить после него, а не потерять (охота 19.11)
+            self.restarting.add_done_callback(lambda _t: self.reconfigure())
             return
         cfg = self.settings()
         media = (cfg['media_address'], cfg['media_port'])
@@ -651,8 +662,11 @@ class Speakers:
         result = event.get('result') or {}
         sid = event.get('session')
         for station in list(self.items.values()):
-            ctx = self.app.agents.get(station.agent_id)
-            if station.sid != sid or event.get('agent_id', ctx.agent_id) != ctx.agent_id:
+            if station.sid != sid:
+                continue
+            try:ctx = self.app.agents.get(station.agent_id)
+            except HumanError:continue  # агент колонки в архиве — остальные колонки не страдают (охота 19.11)
+            if event.get('agent_id', ctx.agent_id) != ctx.agent_id:
                 continue
             text = result.get('text') or ''
             waiting = station.waiting

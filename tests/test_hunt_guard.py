@@ -293,3 +293,23 @@ class Hunt1911MediumTest(TempDirCase):
         from bender.tools.shell import SECRETISH, ENV_KEEP
         self.assertTrue(SECRETISH.search('GITHUB_TOKEN'));self.assertTrue(SECRETISH.search('OPENAI_API_KEY'))
         self.assertFalse(SECRETISH.search('PATH'));self.assertIn('SSH_AUTH_SOCK',ENV_KEEP)
+
+
+class Hunt1911CoreTest(TempDirCase):
+    def test_posix_colon_path_and_boot_error_not_saved(self):
+        import os
+        from bender.core.pathutil import canonical
+        from bender.core.watchdog import save_boot, load_boot
+        if os.name != 'nt':
+            self.assertTrue(str(canonical(self.tmp/'log-12:30.txt')).endswith('log-12:30.txt'))
+        (self.tmp/'local').mkdir();(self.tmp/'local'/'boot.txt').write_text('garbage\n')
+        boot=load_boot(self.tmp);self.assertTrue(boot.get('_error'))
+        self.assertFalse(save_boot(self.tmp,boot))
+        self.assertEqual((self.tmp/'local'/'boot.txt').read_text(),'garbage\n')
+
+    def test_atomic_write_keeps_mode(self):
+        import os, stat
+        from bender.core.fsutil import atomic_write
+        p=self.tmp/'unit.service';p.write_text('a');os.chmod(p,0o644)
+        atomic_write(p,b'b')
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode),0o644)
