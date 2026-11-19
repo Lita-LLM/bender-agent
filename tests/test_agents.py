@@ -49,8 +49,13 @@ class AgentsTest(TempDirCase):
             ctx=host.agents.get('one');ctx.selfdir.write('MEMORY.md','# Своя память\n\nЗАПОМНЕННЫЙ-ЛИМОН')
             (ctx.dirs.work/'file.txt').write_text('свой файл')
             ctx.settings.set('appearance',{'large_font':True})
+            ctx.heart.add('Отчёт',kind='agent',prompt='отчёт',cron='0 9 * * *',authority=[{'capability':'msg.send','target':'*'}])
             raw=host.agents.export('one')
             imported=host.agents.import_archive(raw,name='Копия');copy=host.agents.get(imported['id'])
+            # Охота 16.11: полномочия задач из чужого архива не переносятся.
+            rows=copy.store.q('SELECT authority, created_by, enabled FROM jobs')
+            self.assertTrue(rows)
+            self.assertTrue(all(r['authority']=='[]' and r['created_by']=='import' and not r['enabled'] for r in rows))
             self.assertIn('ЗАПОМНЕННЫЙ',copy.selfdir.read('MEMORY.md'))
             self.assertEqual((copy.dirs.work/'file.txt').read_text(),'свой файл')
             self.assertTrue(copy.settings.get('appearance','large_font'))

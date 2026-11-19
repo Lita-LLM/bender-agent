@@ -6,8 +6,9 @@ function inline(s) {
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+    // Ссылки и автоссылки — одним проходом: второй проход по уже собранному HTML вскрывал href (XSS, 16.11).
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)<"]+)\)|(^|[\s(])(https?:\/\/[^\s<)"]+)/g, (m, label, href, pre, url) =>
+      href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>` : `${pre}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
 }
 
 export function mdToHtml(text) {

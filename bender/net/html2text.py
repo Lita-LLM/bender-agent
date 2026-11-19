@@ -17,6 +17,13 @@ BLOCK = {"p", "div", "section", "article", "main", "header", "footer", "aside", 
          "blockquote", "address", "details", "summary", "dl", "dt", "dd", "table", "thead", "tbody", "tfoot", "ul", "ol", "hr", "body", "html"}
 
 
+MAX_OUT = 4_000_000  # символов: дальше — усечённый текст, а не память процесса
+
+
+class _Full(Exception):
+    pass
+
+
 class _Parser(HTMLParser):
     def __init__(self, base: str):
         super().__init__(convert_charrefs=True)
@@ -31,8 +38,12 @@ class _Parser(HTMLParser):
         self.list_stack: list[str] = []
         self.ol_counter: list[int] = []
         self.cell = False
+        self.size = 0
 
     def emit(self, text: str) -> None:
+        self.size += len(text)
+        if self.size > MAX_OUT:
+            raise _Full
         if self.link_text:
             self.link_text[-1].append(text)
         else:
@@ -64,7 +75,7 @@ class _Parser(HTMLParser):
                 self.nl()
         elif tag == "li":
             self.nl()
-            depth = max(0, len(self.list_stack) - 1)
+            depth = min(max(0, len(self.list_stack) - 1), 8)  # тысячи вложенных <ul> раздували вывод квадратично (охота 16.11)
             if self.list_stack and self.list_stack[-1] == "ol":
                 self.ol_counter[-1] += 1
                 self.emit("  " * depth + f"{self.ol_counter[-1]}. ")
@@ -152,6 +163,10 @@ def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
         p.close()
     except Exception:  # noqa: BLE001 — кривой HTML не должен ронять тул
         pass
+    # Незакрытая ссылка не съедает остаток страницы: её текст возвращается в вывод (охота 16.11).
+    while p.link_text:
+        tail = "".join(p.link_text.pop())
+        (p.link_text[-1] if p.link_text else p.out).append(tail)
     text = "".join(p.out)
     text = unescape(text)
     lines = [ln.rstrip() for ln in text.split("\n")]

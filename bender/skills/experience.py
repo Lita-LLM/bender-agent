@@ -134,6 +134,8 @@ async def learn(skills, spec, ctx, *, draft=False):
     if skills.root(name).exists():
         if skills.package(name, full=True)["data"] == data:
             return {"name": name, "enabled": skills.active(skills.package(name)), "unchanged": True}
+        if ctx.tainted or (ctx.unattended and ctx.actor != "sleep"):
+            await ctx.check("skill.learn", name, "ПЕРЕЗАПИСАТЬ уже существующий навык (скрипты и файлы пакета заменятся)")
         archive_version(skills, name)
     replace(skills, name, data)
     item = skills.package(name)

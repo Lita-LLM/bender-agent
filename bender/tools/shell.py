@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import signal
 import sys
 
@@ -41,6 +42,11 @@ async def start_command(ctx, command, cwd="", allow_net=False, argv=None):
         from ..core.errors import HumanError
 
         raise HumanError("process_off", "Фоновые команды выключены во время одобрения", "Повтори запуск после включения.")
+    if ctx.tainted:
+        # После чужого текста секрет в команде спрашивается, как в браузере и навыках (охота 16.11); в чистом ходе — как раньше.
+        from ..guard import SECRET_REF
+        for name in dict.fromkeys(SECRET_REF.findall(command)):
+            await ctx.check("secret.use", name, f"подставить секрет «{name}» в команду")
     if argv is None:
         expanded, used = agent_ctx.guard.expand_secrets(command, tool="run", session_id=ctx.session_id)
     else:
@@ -108,8 +114,10 @@ def register(reg) -> None:
         except asyncio.TimeoutError:
             timed_out = True
         finally:
-            if proc.returncode is None:
-                _kill(proc)
+            # Группу добиваем всегда: фоновый потомок (`prog &`) переживал выход лидера и таймаут (охота 16.11).
+            alive = proc.returncode is None
+            _kill(proc)
+            if alive:
                 await proc.wait()
             if not completion.done():
                 completion.cancel()
@@ -127,8 +135,34 @@ def register(reg) -> None:
         head = f"[код выхода {code}]" if not timed_out else f"[остановлено по таймауту {timeout} с]"
         if total > MAX_CAPTURE:
             head += f" [вывод {total} байт, показана часть]"
-        return ToolResult(head + "\n" + _clip(out), ok=(code == 0 and not timed_out), summary=f"{command[:60]} → {('таймаут' if timed_out else f'код {code}')}",
+        return ToolResult(head + "\n" + _clip(out), ok=(code == 0 and not timed_out), tainted=_reads_untrusted(agent_ctx, command, workdir, allow_net), summary=f"{command[:60]} → {('таймаут' if timed_out else f'код {code}')}",
                           data={"code": code, "timed_out": timed_out})
+
+
+def _reads_untrusted(agent_ctx, command: str, workdir, allow_net: bool) -> bool:
+    """Вывод команды — чужой текст, если она ходила в сеть или трогала входящие файлы (как read_file). Охота 16.11."""
+    if allow_net:
+        return True
+    from pathlib import Path
+
+    from ..channels.media import untrusted
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    for w in words:
+        if w.startswith("-") and "=" in w:
+            w = w.split("=", 1)[1]
+        if not w or w.startswith("-"):
+            continue
+        try:
+            p = Path(os.path.expanduser(w))
+            p = p if p.is_absolute() else Path(workdir) / p
+            if untrusted(agent_ctx, p.resolve()):
+                return True
+        except Exception:  # noqa: BLE001 — слово команды не путь (2>&1, URL): просто пропускаем
+            continue
+    return "inbox" in command
 
 
 def _kill(proc) -> None:

@@ -1,6 +1,7 @@
 """Потолки хозяина: проверяются до правил/грантов, наследуются только пересечением."""
 from __future__ import annotations
 
+import re
 import fnmatch
 from urllib.parse import urlsplit
 from ..core.errors import HumanError
@@ -102,6 +103,7 @@ class Rights:
             if action.capability=='fs.read' and getattr(ctx,'_task_agent',None):roots+=ctx._task_agent.read_dirs()
             if not any(within(path,root) for root in roots):return 'Путь вне разрешённых папок. Хозяин: Стая → Права → Дополнительные рабочие папки.'
         if action.capability.startswith('net.') and rights['network_hosts']:
+            if re.search(r'[\\\x00-\x20\x7f]',action.target or '') or '@' in urlsplit(action.target or '').netloc:return 'Адрес с обратной косой, пробелом или логином не сверяется со списком узлов. Дай обычный адрес.'
             hostname=(urlsplit(action.target).hostname or '').lower()
             if not any(fnmatch.fnmatchcase(hostname,h.lower()) for h in rights['network_hosts']):return 'Узел сети не разрешён. Хозяин: Стая → Права → Разрешённые узлы сети.'
         return ''

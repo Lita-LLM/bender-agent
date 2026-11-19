@@ -176,7 +176,7 @@ def register(reg) -> None:
         capability = 'net.read' if action == 'read' else 'msg.send'
         await bot.request(ctx, capability, 'userbot:chat:' + str(cid), {'edit': 'править сообщение', 'delete': 'удалить сообщение', 'react': 'поставить реакцию', 'pin': 'закрепить сообщение',
                                                                       'unpin': 'открепить сообщение', 'read': 'отметить прочитанным'}[action] + ' в Telegram ' + name, 'message', params,
-                          detail={'preview': text[:1500]} if text else None)
+                          detail={'op': action, **({'preview': text[:1500]} if text else {})})
         return ToolResult('Готово.', summary=action + ' ' + name[:40])
 
     @reg.tool('tg_file', 'Telegram: скачать файл', group='userbot', available=_on)

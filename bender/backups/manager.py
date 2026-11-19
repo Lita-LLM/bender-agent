@@ -340,7 +340,7 @@ class Backups:
                 if alias in aliases or len(files) >= 100000:
                     raise error('Имена файлов неоднозначны для переносимого бекапа или их слишком много', 'Разведи имена, различающиеся лишь регистром/Unicode, или раздели набор данных. Предел — 100000 файлов.')
                 aliases.add(alias)
-                if rel in ('bender.db-wal', 'bender.db-shm') or (rel == 'secrets.json' and not cfg['include_secrets']):
+                if rel in ('bender.db-wal', 'bender.db-shm') or (rel in ('secrets.json', 'local/web_token') and not cfg['include_secrets']):
                     continue
                 if any(parent.is_symlink() for parent in path.parents):
                     raise error('Данные заменены ссылкой во время копирования')

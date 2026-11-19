@@ -76,6 +76,8 @@ def choice(text: str, can_remember: bool = False):
     """Ответ на подтверждение голосом: once / task / always / deny или None, если не понял."""
     words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
     joined = ' '.join(words)
+    if NO.intersection(words):
+        return 'deny'
     for phrase, value in PHRASES.items():
         if joined == phrase or joined.startswith(phrase + ' ') or joined.endswith(' ' + phrase):
             return value if value != 'always' or can_remember else 'once'

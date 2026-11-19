@@ -343,6 +343,10 @@ class Agents:
                     value={k:(base64.b64decode(v['$bytes']) if isinstance(v,dict) and set(v)=={'$bytes'} else v) for k,v in row.items() if k in columns}
                     if 'agent_id' in columns:value['agent_id']=ctx.agent_id
                     if table=='jobs' and 'enabled' in value:value['enabled']=0
+                    if table=='jobs':
+                        # Полномочия задач одобрял чужой хозяин: после импорта их выдаёт только наш (охота 16.11).
+                        if 'authority' in columns:value['authority']='[]'
+                        if 'created_by' in columns:value['created_by']='import'
                     if table=='sessions' and 'meta' in value:
                         value['meta']=dumps({**json.loads(value['meta']), 'home_channel':'pult'})
                     if value:

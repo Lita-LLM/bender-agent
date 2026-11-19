@@ -258,7 +258,7 @@ class Guard:
             return d
         grants = self._turn_grants.get(session_id or "", set())
         if (a.capability, a.target) in grants or (a.capability, "*") in grants or self.session_granted(a.capability, session_id) or \
-                any(c == a.capability and t not in ("*", a.target) and fnmatch.fnmatch(a.target, t) for c, t in grants):
+                any(c == a.capability and t not in ("*", a.target) and fnmatch.fnmatch(a.target, t) and not _chained(a) for c, t in grants):
             if a.capability in ("exec", "mcp.connect", "skill.run") and self.app.settings.get("guard", "hardline", True) and hardline_hit(a.target if a.capability == "exec" else a.detail.get("command", "")):
                 pass  # жёсткий список не отменяется ни одобрением, ни полномочиями
             elif self._hard_deny(a):
@@ -391,10 +391,20 @@ class Guard:
         """Вычистить значения секретов из вывода, который увидит модель."""
         if not text:
             return text
-        for v in self.app.secrets.values():
+        # Длинные первыми: если один секрет — часть другого, короткий не должен оставить хвост длинного (охота 16.11).
+        for v in sorted(set(self.app.secrets.values()), key=len, reverse=True):
             if v and v in text:
                 text = text.replace(v, "[секрет скрыт]")
         return text
+
+
+def _chained(a) -> bool:
+    """Шаблон полномочия («df *») покрывает одну команду, а не цепочку или перенаправление (охота 16.11)."""
+    from .policy import CHAIN
+    if a.capability not in ("exec", "skill.run", "mcp.connect"):
+        return False
+    target = a.target if a.capability == "exec" else str(a.detail.get("command") or a.target)
+    return bool(CHAIN.search(target) or re.search(r"[<>]", target))
 
 
 def _verdict_word(v: str) -> str:

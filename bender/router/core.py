@@ -540,7 +540,9 @@ class Switchboard:
         if not prices:
             return 0.0
         per = 1_000_000.0
-        cost = (usage.input - usage.cache_read) * float(prices.get("in", 0)) / per
+        # У Anthropic input_tokens — уже только некэшированная часть; у OpenAI-совместимых cached_tokens входит в prompt_tokens (охота 16.11).
+        fresh = usage.input if provider.get("kind") == "anthropic" else usage.input - usage.cache_read
+        cost = fresh * float(prices.get("in", 0)) / per
         cost += usage.output * float(prices.get("out", 0)) / per
         cost += usage.cache_read * float(prices.get("cache_read", prices.get("in", 0) * 0.1)) / per
         cost += usage.cache_write * float(prices.get("cache_write", prices.get("in", 0) * 1.25)) / per

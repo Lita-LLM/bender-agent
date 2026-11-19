@@ -269,7 +269,7 @@ async def _compact(agent_ctx, sid: str, budget: int, *, force: bool = False, dur
     agent_ctx.store.update_session(sid, meta={"compact": new})
     diary = str(data.get("diary") or "").strip()
     if diary:
-        selfdir.append_diary(agent_ctx.dirs.diary, f"(разговор) {diary}")
+        selfdir.append_diary(agent_ctx.dirs.diary, f"(разговор) {diary}", tainted=new['tainted'])  # охота 16.11
     agent_ctx.journal.write("memory", f"Разговор сжат: {len(part)} сообщ. → пересказ {len(summary)} символов", actor="memory",
                       data={"session": sid, "upto": new["upto"], "count": new["count"]})
     msg = {"role": "event", "kind": "compact", "content": f"🗜 Начало разговора пересказано ({len(part)} сообщ.) — подробности находятся поиском."}

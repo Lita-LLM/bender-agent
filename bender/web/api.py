@@ -399,10 +399,24 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
     @r.route("GET", "/api/claude-code/check")
     @J
     async def claude_code_check(req):
+        # Только команда по умолчанию: GET не несёт заголовка пульта, а соседний порт localhost — тот же «сайт» для куки (16.11).
         from ..router import cli
 
-        cmd = (req.q("command") or "").strip()
-        return await cli.check({"command": cmd} if cmd else {})
+        return await cli.check({})
+
+    @r.route("POST", "/api/claude-code/check")
+    @J
+    async def claude_code_check_command(req):
+        import shlex
+
+        from ..router import cli
+        from ..router.cli_common import command
+        from ..tools.registry import ToolContext
+
+        cmd = str(body(req).get("command") or "").strip()
+        provider = {"command": cmd} if cmd else {}
+        await ToolContext(app, actor="owner", session_id="cli-check").check("exec", shlex.join(command(provider)), "проверить Claude Code: version и auth status")
+        return await cli.check(provider)
 
     @r.route("PATCH", "/api/providers/{pid}")
     @J

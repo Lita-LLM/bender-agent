@@ -180,6 +180,8 @@ def register(reg) -> None:
         """
         facts = ctx.app.facts
         prov = "untrusted" if ctx.tainted else "bender"
+        if ctx.tainted and action in ("set", "close"):
+            await ctx.check("memory.core", "facts", f"{action} {subject} — {relation}: {object[:120]}")
         if action in ("add", "set"):
             try:
                 f = facts.add(subject, relation, object, single=(action == "set"), provenance=prov, importance=importance, source=ctx.session_id or "")

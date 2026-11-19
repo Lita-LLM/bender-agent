@@ -263,7 +263,11 @@ def append_diary(root: Path, text: str, *, tainted: bool = False) -> Path:
     p = diary_path(root)
     p.parent.mkdir(parents=True, exist_ok=True)
     head = "" if p.exists() else f"# {time.strftime('%Y-%m-%d')}\n\n"
-    line = f"- {time.strftime('%H:%M')} {text.strip()}"
+    body = text.strip()
+    if tainted:
+        # Пометка стоит на строке: многострочная запись иначе оставляла внедрённые строки «своими» (охота 16.11).
+        body = " ⏎ ".join(part.strip() for part in body.splitlines() if part.strip())
+    line = f"- {time.strftime('%H:%M')} {body}"
     if tainted:
         line += " <!-- source: untrusted -->"
     with p.open("a", encoding="utf-8") as fh:

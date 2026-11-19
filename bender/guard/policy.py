@@ -163,11 +163,54 @@ def is_safe_read_command(command: str) -> bool:
     if not parts:
         return False
     prog = os.path.basename(parts[0])
+    args = parts[1:]
     if prog == "git":
-        return len(parts) >= 2 and parts[1] in SAFE_GIT and not any(p.startswith("--output") or p == "-o" for p in parts)
-    if prog in ("sort",) and any(p.startswith("-o") or p.startswith("--output") for p in parts[1:]):
+        return len(parts) >= 2 and parts[1] in SAFE_GIT and not any(p.startswith("--output") or p == "-o" or p.startswith("--ext-diff") for p in parts) \
+            and _git_read_only(parts[1], parts[2:])
+    if any(_risky_option(prog, a) for a in args):
         return False
+    if prog == "uniq" and len([a for a in args if not a.startswith("-")]) > 1:
+        return False  # uniq ВХОД ВЫХОД пишет второй файл
+    if prog == "hostname" and any(not a.startswith("-") for a in args):
+        return False  # hostname ИМЯ меняет имя машины
     return prog in SAFE_COMMANDS
+
+
+# Опции «простых» программ, которые запускают код или пишут файлы (находка охоты 16.11): rg --pre, tree -o, sort --compress-program…
+RISKY_OPTIONS = {
+    "rg": ("--pre", "--pre-glob", "-z", "--search-zip"),
+    "tree": ("-o", "--output"),
+    "sort": ("-o", "--output", "--compress-program", "-T", "--temporary-directory", "--random-source", "--files0-from"),
+    "date": ("-s", "--set", "-f", "--file"),
+    "hostname": ("-F", "--file", "-b", "--boot"),
+    "uniq": ("--output",),
+    "grep": ("-f", "--file"),
+}
+
+
+def _risky_option(prog: str, arg: str) -> bool:
+    for opt in RISKY_OPTIONS.get(prog, ()):
+        if arg == opt or arg.startswith(opt + "="):
+            return True
+        if not opt.startswith("--") and arg.startswith(opt) and len(opt) == 2:
+            return True  # -ofile, -Tdir
+        if not opt.startswith("--") and len(opt) == 2 and arg.startswith("-") and not arg.startswith("--") and opt[1] in arg[1:]:
+            return True  # склеенные короткие: -io, -uz
+    return False
+
+
+GIT_LIST_FLAGS = {"-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes", "--verbose", "--show-current", "-n"}
+
+
+def _git_read_only(sub: str, rest: list[str]) -> bool:
+    """branch/tag/remote читают только в формах списка: `git branch x`, `-D`, `remote add` — уже запись."""
+    if sub in ("branch", "tag"):
+        listing = sub == "branch" or any(a in ("-l", "--list") for a in rest)
+        return all(a in GIT_LIST_FLAGS or a.startswith(("--contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "-n"))
+                   or (listing and not a.startswith("-") and sub == "tag") for a in rest)
+    if sub == "remote":
+        return all(a in ("-v", "--verbose") for a in rest) or (bool(rest) and rest[0] in ("show", "get-url") and all(not a.startswith("-") or a in ("-n", "--all", "--push") for a in rest[1:]))
+    return True
 
 
 # --- профили --------------------------------------------------------------------------------
@@ -203,6 +246,41 @@ class Policy:
         for name in ("secrets.json", "bender.db", "bender.db-wal", "bender.db-shm", "local", "skills", "modules", "imports", "diary/hermes", "diary/claude", "versions", "workshop", "exams"):
             if _is_within(path, self.data_dir / name):
                 return "служебные данные Бендера (сейф, база, ключи) — только через свои тулы"
+        return None
+
+    def _reads_protected(self, command: str) -> bool:
+        """`cat ~/.ssh/id_rsa` — «простое чтение», но защищённого места: без песочницы так не пускаем (охота 16.11)."""
+        try:
+            words = shlex.split(command)[1:]
+        except ValueError:
+            return True
+        for w in words:
+            if w.startswith("-") and "=" in w:
+                w = w.split("=", 1)[1]
+            if not w or w.startswith("-"):
+                continue
+            try:
+                if self.protected(self.resolve(w)):
+                    return True
+            except Exception:  # noqa: BLE001 — неоднозначное имя тоже не «простое чтение»
+                return True
+        return False
+
+    def _agent_place(self, path: Path) -> str | None:
+        """«self» или «checkpoints», если путь в личности или снимках main или любого агента Стаи."""
+        roots = [self.data_dir]
+        agents = self.data_dir / "agents"
+        try:
+            if _is_within(path, agents):
+                rel = path.relative_to(agents) if path.is_relative_to(agents) else None
+                if rel and rel.parts:
+                    roots.append(agents / rel.parts[0])
+        except (OSError, ValueError):
+            pass
+        for root in roots:
+            for name in ("self", "checkpoints"):
+                if _is_within(path, root / name):
+                    return name
         return None
 
     def in_work(self, path: Path) -> bool:
@@ -291,6 +369,14 @@ class Policy:
         path = None
         if cap.startswith("fs."):
             path = self.resolve(a.target)
+            if cap in ("fs.write", "fs.delete"):
+                # Охота 16.11: личность агента (data/self) пишется с тем же вопросом, что update_self, а снимки — только своим тулом.
+                place = self._agent_place(path)
+                if place == "checkpoints":
+                    return Decision("deny", "Нельзя: снимки отката меняет только сам Бендер.", "protected", False)
+                if place == "self":
+                    core = "self.rules" if path.name.upper() == "AGENTS.MD" else "memory.core"
+                    return self._decide(replace(a, capability=core, target=str(path)), s)
             why = self.protected(path)
             if why:
                 rule = self._rule_for(a)
@@ -356,7 +442,7 @@ class Policy:
                 return Decision("allow", "Профиль разрешает правки вне рабочей папки.", name)
             return Decision("ask", ("Запись" if cap == "fs.write" else "Удаление") + " вне рабочей папки.", name)
         if cap == "exec":
-            if is_safe_read_command(a.target):
+            if is_safe_read_command(a.target) and not self._reads_protected(a.target):
                 return Decision("allow", "Простая команда только для чтения.", name)
             if a.in_sandbox and level >= 1:
                 return Decision("allow", "Команда идёт в песочницу.", name)

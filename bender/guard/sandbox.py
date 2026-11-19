@@ -143,6 +143,17 @@ def wrap(command: str, *, info: dict, work_dir: Path, allow_net: bool, read_dirs
                     if not known.exists():known.touch(mode=0o600)
                     args+=['--bind',str(known),str(known)]
                 else:args+=['--tmpfs',str(path)] if path.is_dir() else ['--ro-bind','/dev/null',str(path)]
+            # Охота 16.11: шина сессии (/run/user/UID/bus, systemd --user) запускает юнит вне песочницы, а docker.sock — контейнер с корнем.
+            # Каталог прячем целиком, звук возвращаем; сокет ssh-agent вернётся ниже, если есть право SSH.
+            runtime=Path(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}') if hasattr(os,'getuid') else None
+            if runtime and runtime.is_dir() and not (info.get('data_root') and within(canonical(runtime),info['data_root'])) and not within(canonical(work),canonical(runtime)):
+                runtime=canonical(runtime)
+                args+=['--tmpfs',str(runtime)]
+                for name in ('pulse','pipewire-0','pipewire-0-manager'):
+                    keep=runtime/name
+                    if keep.exists():args+=['--ro-bind',str(keep),str(keep)]
+            for dock in ('/var/run/docker.sock','/run/docker.sock'):
+                if Path(dock).is_socket():args+=['--ro-bind','/dev/null',dock]
             sock=info.get('ssh_auth_sock')
             if info.get('ssh') and sock and canonical(sock).is_socket():
                 args+=['--ro-bind',str(canonical(sock)),str(canonical(sock))]
@@ -160,6 +171,7 @@ class Prepared:
         self.job = None
         self.env = {}
         self.argv = wrap(command, info=info, work_dir=work_dir, allow_net=allow_net, cwd=cwd, read_dirs=read_dirs)
+        if not info.get('owner_process') and info.get('kind')=='bwrap':self.env['DBUS_SESSION_BUS_ADDRESS']=''  # шина спрятана, адрес тоже
         if not info.get('ssh') and not info.get('owner_process'):self.env['SSH_AUTH_SOCK']=''
         elif info.get('ssh_auth_sock'):
             from ..core.pathutil import canonical

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -80,6 +81,9 @@ def find_browser() -> str | None:
 
 
 def check_url(ctx, url: str) -> str:
+    # Python и Chromium разбирают «\\» и «@» по-разному: проверка видела один хост, браузер шёл на другой (охота 16.11).
+    if re.search(r'[\\\x00-\x20\x7f]', url or '') or '@' in urlparse(url or '').netloc:
+        raise HumanError('browser_url', 'Адрес с обратной косой, пробелом или логином в браузере закрыт', 'Дай обычный адрес вида https://узел/путь.')
     parsed = urlparse(url or '')
     if parsed.scheme not in ('http', 'https') or not parsed.hostname:
         raise HumanError('browser_url', 'Браузер открывает только адреса http(s)', 'Схемы file:, chrome: и подобные закрыты.')
@@ -114,6 +118,7 @@ class Chrome:
         self.waiting: dict[int, asyncio.Future] = {}
         self.events: asyncio.Queue = asyncio.Queue()
         self.session = None
+        self.target_id = None
         self.write_fd = None
         self.loop = None
 
@@ -154,6 +159,7 @@ class Chrome:
         target = await self.call('Target.createTarget', {'url': 'about:blank'})
         attached = await self.call('Target.attachToTarget', {'targetId': target['targetId'], 'flatten': True})
         self.session = attached['sessionId']
+        self.target_id = target['targetId']
         await self.call('Page.enable', session=self.session)
         self.touch()
         self.watcher = self.loop.create_task(self.watch())
@@ -243,8 +249,20 @@ class Chrome:
         result = await self.call('Runtime.evaluate', {'expression': expression, 'returnByValue': True, 'awaitPromise': True}, self.session)
         return (result.get('result') or {}).get('value')
 
+    async def url(self):
+        """Адрес вкладки от самого браузера: страница не может его подменить, как поле url в снимке (охота 16.11)."""
+        info = await self.call('Target.getTargetInfo', {'targetId': self.target_id})
+        return str((info.get('targetInfo') or {}).get('url') or '')
+
     async def snapshot(self):
-        return json.loads(await self.run(SNAPSHOT) or '{}')
+        try:
+            page = json.loads(await self.run(SNAPSHOT) or '{}')
+        except (TypeError, ValueError):
+            page = {}
+        if not isinstance(page, dict):
+            page = {}
+        page['url'] = await self.url()
+        return page
 
     def alive(self):
         return bool(self.proc and self.proc.poll() is None)
@@ -355,7 +373,10 @@ def register(reg) -> None:
                 # Пароль из Сейфа: хозяин подтверждает каждое использование после чужой страницы, секрет идёт только на привязанный хост.
                 for name in dict.fromkeys(SECRET_REF.findall(text)):
                     await ctx.check('secret.use', name, f'ввести секрет «{name}» на {urlparse(str(page.get("url"))).hostname}')
-                typed, _ = ctx.app.guard.expand_secrets(text, host=urlparse(str(page.get('url'))).hostname or '', tool='browser_type', session_id=ctx.session_id)
+                host = urlparse(str(page.get('url'))).hostname or ''
+                if (urlparse(await chrome.url()).hostname or '') != host:
+                    return ToolResult('Страница ушла на другой адрес, пока ждали разрешения: секрет не введён. Вызови browser_look.', ok=False, summary='адрес сменился')
+                typed, _ = ctx.app.guard.expand_secrets(text, host=host, tool='browser_type', session_id=ctx.session_id)
             js = (f'(() => {{ const e = document.querySelector(\'[data-bref="{int(ref)}"]\'); if (!e) return false; e.focus();'
                   f' const s = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), "value"); if (s && s.set) s.set.call(e, {json.dumps(typed)}); else e.value = {json.dumps(typed)};'
                   ' e.dispatchEvent(new Event("input", {bubbles: true})); e.dispatchEvent(new Event("change", {bubbles: true}));'

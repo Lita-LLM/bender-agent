@@ -1395,6 +1395,8 @@ def add_to_section(text: str, title: str, addition: str) -> str:
 def _copy_tree(src: Path, dst: Path) -> int:
     """Копировать без перезаписи существующего. Возвращает число скопированных файлов."""
     n = 0
+    if src.is_symlink():
+        return 0  # ссылка из чужой папки могла вести на Сейф или корень данных (охота 16.11)
     if src.is_file():
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)

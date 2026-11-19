@@ -330,6 +330,12 @@ class ToolsTest(TempDirCase):
             self.assertFalse((await env.app.tools.run('tg_send', {'chat': '55', 'text': 'утечка'}, b.tool(tainted=True))).ok)
             self.assertEqual(len(asked), 2); self.assertIn('недоверенные', asked[1])
             self.assertTrue((await env.app.tools.run('tg_send', {'chat': 'owner', 'text': 'отчёт'}, b.tool(tainted=True))).ok)
+            # Охота 16.11: заражённый ход не читает и не стирает личную переписку хозяина с агентом.
+            n = len(asked)
+            self.assertFalse((await env.app.tools.run('tg_read', {'chat': 'owner'}, b.tool(tainted=True))).ok)
+            self.assertFalse((await env.app.tools.run('tg_message', {'chat': 'owner', 'action': 'delete', 'message': 1}, b.tool(tainted=True))).ok)
+            self.assertEqual(len(asked), n + 2)
+            self.assertTrue((await env.app.tools.run('tg_read', {'chat': 'owner'}, b.tool())).ok)
 
     @async_test
     async def test_owner_rule_and_estop_block_account(self):

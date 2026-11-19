@@ -201,7 +201,7 @@ def register(reg):
             tg.choose(int(route['chat']),target)
         else:raise HumanError('hand_over','Здесь разговор не передать','Передаётся колонка или чат Telegram; в пульте хозяин выбирает агента сам.')
         from ..agents.handoff import leave
-        leave(host,other,channel,giver,note)
+        leave(host,other,channel,giver,'' if ctx.tainted else note)
         host.journal.write('channel',giver+' передал '+('колонку «'+station.cfg['name']+'»' if station else 'чат Telegram')+' агенту '+name,actor='agent',data={'from':ctx.app.agent_id,'to':other,'channel':channel})
         return ToolResult('Передано: следующая реплика хозяина '+('с колонки' if station else 'в этом чате')+' уйдёт агенту '+name+(', он ответит своим голосом' if station else '')+
                           '. Скажи хозяину одной фразой, кому передал; сам больше не продолжай.',summary='разговор → '+name,data={'agent':other,'channel':channel})

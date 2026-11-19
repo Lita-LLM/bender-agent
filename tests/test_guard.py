@@ -42,6 +42,27 @@ class PolicyTest(TempDirCase):
         self.assertEqual(p.decide(Action("msg.send", "owner", to_owner=True)).verdict, "allow")
         self.assertEqual(p.decide(Action("money", "x")).verdict, "ask")
 
+    def test_safe_read_of_protected_path_is_not_free(self):
+        """Охота 16.11: cat ~/.ssh/id_rsa не проходит как «простое чтение»."""
+        p = self.make(profile="normal")
+        self.assertNotEqual(p.decide(Action("exec", "cat " + str(Path.home() / ".ssh" / "id_rsa"))).verdict, "allow")
+        self.assertNotEqual(p.decide(Action("exec", "cat ~/.ssh/id_rsa")).verdict, "allow")
+        self.assertNotEqual(p.decide(Action("exec", "head -n 5 " + str(self.tmp / "data" / "secrets.json"))).verdict, "allow")
+        self.assertEqual(p.decide(Action("exec", "cat README.md")).verdict, "allow")
+
+    def test_self_and_checkpoints_not_plain_files(self):
+        """Охота 16.11: write_file в data/self идёт как update_self, снимки отката — только своим тулом."""
+        p = self.make(profile="normal")
+        data = self.tmp / "data"
+        heart = Action("fs.write", str(data / "self" / "HEARTBEAT.md"), tainted=True)
+        self.assertEqual(p.decide(heart).verdict, "ask")
+        self.assertEqual(p.decide(Action("fs.write", str(data / "self" / "HEARTBEAT.md"), tainted=True, unattended=True)).verdict, "deny")
+        self.assertEqual(p.decide(Action("fs.write", str(data / "self" / "AGENTS.md"))).verdict, "ask")
+        self.assertEqual(p.decide(Action("fs.write", str(data / "agents" / "helper" / "self" / "AGENTS.md"))).verdict, "ask")
+        self.assertEqual(p.decide(Action("fs.write", str(data / "checkpoints" / "2026-11-16" / "x" / "manifest.json"))).verdict, "deny")
+        self.assertEqual(p.decide(Action("fs.read", str(data / "self" / "MEMORY.md"))).verdict, "allow")
+        self.assertEqual(p.decide(Action("fs.write", str(data / "work" / "a.txt"), tainted=True)).verdict, "allow")
+
     def test_taint_breaks_trifecta(self):
         p = self.make(profile="trust")
         self.assertEqual(p.decide(Action("net.send", "https://evil.example")).verdict, "allow")
@@ -87,3 +108,17 @@ class PolicyTest(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafeReadOptionsTest(unittest.TestCase):
+    """Охота 16.11: «простые» команды с опциями, которые исполняют код или пишут, больше не проходят без вопроса."""
+
+    def test_risky_options_are_not_safe(self):
+        from bender.guard.policy import is_safe_read_command as safe
+        for c in ("rg --pre sh x p.txt", "rg -z foo", "tree -i -o /tmp/x w", "sort --compress-program=sh big", "sort -o out a",
+                  "git branch -D main", "git branch newb", "git remote add x https://e", "git tag v1", "git diff --ext-diff",
+                  "uniq a b", "hostname evil", "date -s 2020", "grep -f pats x"):
+            self.assertFalse(safe(c), c)
+        for c in ("rg -n foo src", "tree -L 2", "sort -u a", "git branch", "git branch -a", "git remote -v", "git remote get-url origin",
+                  "git tag", "git tag --list", "git log --oneline", "uniq -c a", "hostname", "hostname -I", "date", "date +%F", "grep -rn foo .", "ls -la"):
+            self.assertTrue(safe(c), c)

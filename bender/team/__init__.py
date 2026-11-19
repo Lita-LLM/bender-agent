@@ -325,11 +325,14 @@ class Team:
                 data = side.parse_json(result) if schema.get("type", "object") == "object" else _loads(result)
                 errs = validate(data, schema) if data is not None else ["ответ — не JSON"]
                 if errs:  # ровно одна попытка исправления
+                    first_tainted = bool(res.get("tainted"))  # второй ход пишет по той же заражённой истории (охота 16.11)
                     res = await worker.ctx.mind.say(sid, "Ответ не прошёл проверку схемы:\n- " + "\n- ".join(errs[:10]) + "\nПришли только исправленный JSON, без пояснений.", **kw) or {}
                     fixed = (res.get("text") or "").strip()
                     data2 = side.parse_json(fixed) if schema.get("type", "object") == "object" else _loads(fixed)
                     errs = validate(data2, schema) if data2 is not None else ["ответ — не JSON"]
                     data, result = data2, fixed or result  # остаётся последняя попытка — и при удаче, и сырой текстом
+                    if first_tainted:
+                        res = {**res, "tainted": True}
                 valid = not errs
                 if not valid:
                     data = None
@@ -356,6 +359,9 @@ class Team:
         cost = agent_ctx.store.one("SELECT COALESCE(SUM(cost), 0) AS c, COUNT(*) AS n FROM calls WHERE session_id = ?", (sid,))
         child_tainted = bool(res.get("tainted")) or bool(t["tainted"])
         result_tainted = child_tainted and not (valid and data is not None and harmless(data, schema))
+        if child_tainted and not result_tainted:
+            # Безвредны только данные по схеме; сырой текст заражённого субагента родителю не отдаём (охота 16.11).
+            result = json.dumps(data, ensure_ascii=False)
         self._set(t["id"], status=status, result=result[:20000], data=data, schema_valid=None if valid is None else int(valid), error=error,
                   cost=float(cost["c"] if cost else 0), steps=int(cost["n"] if cost else 0), finished=time.time(), result_tainted=int(result_tainted))
         done = self.get(t["id"])

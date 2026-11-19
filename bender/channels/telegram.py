@@ -1203,7 +1203,9 @@ class Telegram:
             c = ev.get("card") or {}
             row = [{"text": "Да, один раз", "callback_data": f"ap:{c['id']}:once"}] + ([{"text": "В этом разговоре", "callback_data": f"ap:{c['id']}:task"}] if c.get("can_session", True) else [])
             row2 = ([{"text": ("Всегда: " + str(c.get("remember") or "такое"))[:60], "callback_data": f"ap:{c['id']}:always"}] if c.get("can_remember") else []) + [{"text": "Нет", "callback_data": f"ap:{c['id']}:deny"}]
-            text = f"⚠ Предохранитель спрашивает: **{c.get('summary') or c.get('what')}**\n{c.get('reason') or ''}" + ("\nВ этом ходе агент читал недоверенное." if c.get("tainted") else "")
+            # Что именно одобряется — блоком кода: разметка из команды ([docs](…), **…**) не прячет её часть (охота 16.11).
+            what = str(c.get('summary') or c.get('what') or '').replace("```", "ʼʼʼ")
+            text = f"⚠ Предохранитель спрашивает:\n```\n{what}\n```\n{c.get('reason') or ''}" + ("\nВ этом ходе агент читал недоверенное." if c.get("tainted") else "")
             self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [row, row2]))
         elif t == "question" and s.get("approvals", True):
             c = ev.get("card") or {}

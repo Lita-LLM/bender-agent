@@ -91,7 +91,7 @@ function ClaudeCodeSetup({ busy, onConnect }) {
   const [checking, setChecking] = useState(false);
   const check = async () => {
     setChecking(true);
-    try { setSt(await get(`/api/claude-code/check${cmd.trim() ? `?command=${encodeURIComponent(cmd.trim())}` : ""}`)); } catch (e) { setSt({ found: false, error: e.message }); }
+    try { setSt(await (cmd.trim() ? post("/api/claude-code/check", { command: cmd.trim() }) : get("/api/claude-code/check"))); } catch (e) { setSt({ found: false, error: e.message }); }
     setChecking(false);
   };
   useEffect(() => { check(); }, []);

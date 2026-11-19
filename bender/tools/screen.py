@@ -171,8 +171,9 @@ def register(reg) -> None:
                 return ToolResult('Неизвестная клавиша.', ok=False, summary='клавиша')
             if not key and not text:
                 return ToolResult('Нужен текст или клавиша.', ok=False, summary='пусто')
-            await ctx.check('screen.act', program(info), f'печатать в окне {program(info)}', detail={'text': text[:200], 'key': key})
+            shown = text[:500]
+            await ctx.check('screen.act', program(info), f'печатать в окне {program(info)}', detail={'text': shown, 'key': key})
             await allowed_window(ctx, ex, window, cfg)
-            await ex.call(op='key', hwnd=int(window), key=key) if key else await ex.call(op='type', hwnd=int(window), text=text)
+            await ex.call(op='key', hwnd=int(window), key=key) if key else await ex.call(op='type', hwnd=int(window), text=shown)
             return ToolResult('Введено.', summary='введено')
         return await guarded(make)

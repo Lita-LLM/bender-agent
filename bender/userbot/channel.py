@@ -701,6 +701,9 @@ class Userbot:
             if action.actor == 'system' and action.tool == 'userbot_reply':
                 return Decision('allow', 'Ответ в чат, который разрешил хозяин.', 'userbot-reply', False) if mine or row['reply'] else \
                     Decision('deny', 'Ответы в этот чат хозяин не включал.', 'userbot-reply', False)
+            if mine and taint and self.chat_of(session) != cid and (action.capability == 'net.read' or (action.detail or {}).get('op') in ('edit', 'delete', 'pin', 'unpin')):
+                # Ход по чужому чату не читает, не пересылает и не стирает переписку хозяина с агентом (охота 16.11).
+                return Decision('ask', 'Ход читал недоверенное в другом чате, а это личная переписка хозяина.', 'userbot-owner-chat', False)
             if action.capability == 'net.read':
                 if mine or row['see'] or cfg.get('trust') == 'all':
                     return Decision('allow', 'Чат открыт хозяином.', 'userbot-chat', False)

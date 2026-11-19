@@ -102,6 +102,18 @@ def system_prompt(agent_ctx) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def public_system_prompt(agent_ctx) -> str:
+    """Для чужих людей (участник группы): кто агент и как говорит — без памяти, карточки и заметок о хозяине (охота 16.11)."""
+    sd = agent_ctx.selfdir
+    parts = [CORE] + [t for t in (sd.read("IDENTITY.md").strip(), sd.read("SOUL.md").strip()) if t]
+    from .manners import prompt_section
+    manner = prompt_section(agent_ctx)
+    if manner:
+        parts.append(manner)
+    parts.append("# Собеседник — не хозяин\n\nТы отвечаешь человеку из списка в группе словами. Тулов, памяти и данных хозяина в этом разговоре нет.")
+    return "\n\n---\n\n".join(parts)
+
+
 PAID_HISTORY_CAP = 200000      # ключ с оплатой за токен: дальше каждый шаг заметно дороже
 UNKNOWN_CONTEXT_BUDGET = 24000  # локальная модель неизвестной длины: у них контекст бывает маленьким
 UNKNOWN_CLOUD_BUDGET = 100000   # облачная модель неизвестной длины; не влезет — ход урежет вдвое и повторит
