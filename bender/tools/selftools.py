@@ -32,6 +32,43 @@ def register(reg) -> None:
         done = sum(1 for i in clean if i["status"] == "done")
         return ToolResult(render_plan(clean), summary=f"план: {done}/{len(clean)}")
 
+    @reg.tool("goal", "Цель", group="self")
+    async def goal(ctx: ToolContext, action: str = "show", text: str = "", done_when: str = "", note: str = "") -> ToolResult:
+        """Долгая цель этого разговора. Пока цель в работе, ход не кончается на ответе без тулов: ты сам продолжаешь к ней,
+        не спрашивая хозяина о каждом шаге. Ставь, когда хозяин просит работать до результата («доведи», «пока не заработает»)
+        или сам берёшь многошаговую работу. Цель видна в каждом запросе и переживает сжатие.
+
+        action — set (поставить/заменить), done (достигнута), blocked (дальше нельзя без решения хозяина), drop (снять), show
+        text — для set: что должно получиться, одной-двумя фразами
+        done_when — для set: проверяемый признак готовности (тесты зелёные, файл отправлен…)
+        note — для done: итог; для blocked: вопрос хозяину с вариантами; для drop: причина
+        """
+        from ..mind import goals
+        sid = ctx.session_id
+        current = goals.get(ctx.app, sid)
+        if action == "set":
+            if not text.strip():
+                return ToolResult("Ошибка: для set нужен text — что должно получиться.", ok=False, summary="нет цели")
+            value = goals.start(ctx.app, sid, text, done_when, by=ctx.actor)
+            limit = int(ctx.app.settings.get("agent", "goal_rounds", 30) or 0)
+            tail = (f"Ход не закончится на ответе без тулов: до {limit} самопродолжений. Работай сам; хозяина спрашивай только о том, что не можешь решить сам."
+                    if limit else "Самопродолжения выключены хозяином (agent.goal_rounds=0): цель только видна в запросе.")
+            return ToolResult("Цель поставлена: " + value["text"] + (" Готово, когда: " + value["done_when"] if value["done_when"] else "") + "\n" + tail,
+                              summary="цель поставлена", data={"goal": value})
+        if action in ("done", "blocked", "drop"):
+            if not current or current["state"] in ("done", "dropped"):
+                return ToolResult("Открытой цели в этом разговоре нет.", ok=False, summary="нет цели")
+            if action != "done" and not note.strip():
+                return ToolResult("Ошибка: нужен note — " + ("вопрос хозяину." if action == "blocked" else "причина."), ok=False, summary="нужна пометка")
+            value = goals.mark(ctx.app, sid, {"done": "done", "blocked": "blocked", "drop": "dropped"}[action], note)
+            say = {"done": "Цель закрыта. Теперь коротко отчитайся хозяину: что сделано и как проверено.",
+                   "blocked": "Цель ждёт хозяина. Задай ему этот вопрос в ответе (с вариантами и своей рекомендацией); его ответ снова запустит работу.",
+                   "drop": "Цель снята."}[action]
+            return ToolResult(say, summary="цель: " + value["state"], data={"goal": value})
+        if not current:
+            return ToolResult("Цели в этом разговоре нет.", summary="цели нет")
+        return ToolResult(json.dumps(current, ensure_ascii=False), summary="цель: " + current["state"], data={"goal": current})
+
     @reg.tool("settings", "Мои настройки", group="self")
     async def settings(ctx: ToolContext, group: str = "", changes: dict | None = None, reason: str = "") -> ToolResult:
         """Посмотреть или изменить свои настройки (пульс, сон, лимиты, Предохранитель…). Без group — список групп.

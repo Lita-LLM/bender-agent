@@ -144,7 +144,7 @@ class Search:
             if not web_url(endpoint):
                 raise SearchError("Нужен адрес http(s) без логина и пароля", name)
             # Разрешения проверяются и при чтении кэша; отказ не запускает обход через другой сервис.
-            await ctx.check("net.read", endpoint, f"найти в {name}: {query[:100]}")
+            await ctx.check("net.read", endpoint, f"найти в {name}: {query[:100]}", detail={"configured": True})  # адрес поиска задал хозяин: свой SearXNG на localhost не спрашивается
             key_name = str(settings.get(name + "_secret", ""))
             credential = app.secrets.get(key_name) if key_name else None
             fingerprint = hashlib.sha256((credential or "").encode()).hexdigest()

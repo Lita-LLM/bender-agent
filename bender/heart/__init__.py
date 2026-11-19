@@ -35,6 +35,9 @@ def late_words(sec: float) -> str:
     return f"с опозданием на {round(sec / 86400)} дн"
 
 
+
+UNTRUSTED_MARK = "⚠ недоверенное: "
+
 class Heart:
     def __init__(self, agent_ctx):
         self.app = agent_ctx
@@ -302,7 +305,8 @@ class Heart:
             agent_ctx.store.add_message(main, msg, {"job": job.id, "session": sid})
             agent_ctx.bus.publish({"session": main, "type": "message", "message": msg})
             agent_ctx.bus.publish({"type": "notify", "kind": "job", "title": job.name, "text": (text or err or "")[:300], "job": job.id})
-        return text[:500], sid, err
+        # Ход задачи читал чужое — сводка помечена: schedule run/history отдадут её как недоверенную (охота 19.11).
+        return (UNTRUSTED_MARK if res.get("tainted") else "") + text[:500], sid, err
 
     async def _reflex(self, job: Job) -> str:
         from . import reflexes

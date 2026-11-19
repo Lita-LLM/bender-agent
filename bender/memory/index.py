@@ -151,8 +151,10 @@ def parse_md(text: str, *, default_ts: float, default_provenance: str = "bender"
             lt = time.localtime(default_ts)
             ts = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(hm.group(1)), int(hm.group(2)), 0, 0, 0, -1))
         prov = default_provenance
-        if src and src.group(1).lower() in ("untrusted", "web", "external"):
+        # Любая метка «чужое» побеждает: внедрённая в начало «source: bender» не отмывает запись (охота 19.11).
+        if any(m.group(1).lower() in ("untrusted", "web", "external") for m in SOURCE.finditer(meta)):
             prov = "untrusted"
+            imp = trig = None  # важность и слова-триггеры из чужого текста не принимаются
         body = (f"{heading}: " if heading and not clean.startswith("#") else "") + clean
         for i in range(0, len(body), MAX_CHUNK):
             chunks.append(Chunk(text=body[i:i + MAX_CHUNK], ref=f"L{buf_line}" + (f"+{i}" if i else ""), ts=ts, provenance=prov,

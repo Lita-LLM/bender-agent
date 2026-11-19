@@ -117,10 +117,14 @@ class ClaudeCodeTest(TempDirCase):
             self.assertIn("--session-id", argv)
             self.assertEqual(argv[argv.index("--system-prompt-snapshot") + 1], "off")
             self.assertIn("--restricted", argv)  # без хуков и настроек хозяина
-            self.assertIn("Как ты устроен", argv[argv.index("--system-prompt") + 1])  # личность и правила Бендера
+            self.assertIn("Как ты устроен", r1["system"])  # личность и правила Бендера
+            # секреты и память — файлами 0600, не в argv (охота 19.11)
+            self.assertNotIn("--system-prompt", argv);self.assertNotIn("Bearer", json.dumps(argv))
+            self.assertEqual(r1["secret_modes"], {"--mcp-config": "0o600", "--system-prompt-file": "0o600"})
+            self.assertFalse(Path(argv[argv.index("--mcp-config") + 1]).exists())  # убран после хода
             # как у API-моделей: время, канал и метка реплики — без них Claude лез за временем в шелл
             self.assertRegex(r1["prompt"], r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}, \w+ · канал: [^\]]+\]\n\[(?:пн|вт|ср|чт|пт|сб|вс) \d{2}\.\d{2} \d{2}:\d{2}\]\nпривет$")
-            self.assertIn("mcp__bender__recall", argv[argv.index("--system-prompt") + 1])  # имена тулов, как их видит Claude Code
+            self.assertIn("mcp__bender__recall", r1["system"])  # имена тулов, как их видит Claude Code
             self.assertEqual(r1["env"].get("CLAUDE_CODE_DISABLE_CLAUDE_MDS"), "1")  # чужие CLAUDE.md не подмешиваются
             self.assertEqual(r1["server"]["name"], "bender")
             self.assertIn("write_file", r1["tools"])

@@ -203,8 +203,12 @@ async def run_claude(router, cand, messages: list[dict], tools, params: dict, re
         args += ["--system-prompt-snapshot", "off"]  # свежая память Бендера — каждый ход
     if system and stateful:
         system += TOOL_NAMES
+    private = {}  # секреты и память — файлами 0600, не в argv: /proc/<pid>/cmdline читает любой процесс (охота 19.11)
     if system:
-        args += ["--system-prompt", system]
+        if "--system-prompt-file" in known:
+            private["--system-prompt-file"] = system
+        else:
+            args += ["--system-prompt", system]
     if cand.model and cand.model.strip().lower() != "default":
         args += ["--model", cand.model]
     if stateful:
@@ -227,7 +231,8 @@ async def run_claude(router, cand, messages: list[dict], tools, params: dict, re
         url, token = await bridge.open(turn, turn.tool_names)
         cfg = {"mcpServers": {"bender": {"type": "http", "url": url, "headers": {"Authorization": f"Bearer {token}"}}}}
         cc_session = state.get("session") or str(uuid.uuid4())
-        args += ["--mcp-config", json.dumps(cfg), "--allowedTools", "mcp__bender"]
+        private["--mcp-config"] = json.dumps(cfg)
+        args += ["--allowedTools", "mcp__bender"]
         args += ["--resume", cc_session] if state.get("session") else ["--session-id", cc_session]
         cwd = Path(app.dirs.local) / "claude-code"
     else:
@@ -276,7 +281,17 @@ async def run_claude(router, cand, messages: list[dict], tools, params: dict, re
             router.observe(cand, 0, "claude", ev.get("rate_limit_info") or {})
         elif t == "result":
             final = ev
+    secret_dir = None
     try:
+        if private:
+            import tempfile
+            secret_dir = tempfile.mkdtemp(prefix="bender-cc-")  # 0700
+            for n, (flag, text) in enumerate(private.items()):
+                path = os.path.join(secret_dir, f"{n}.{'json' if flag == '--mcp-config' else 'txt'}")
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                args[len(exe):len(exe)] = [flag, path]  # флаги до текста запроса
         returncode, err_text = await stream(args, prompt=prompt, cwd=cwd, env=env,
                                            timeout=float(p.get("timeout") or 1800), on_event=event,**extra)
     except asyncio.TimeoutError:
@@ -284,6 +299,8 @@ async def run_claude(router, cand, messages: list[dict], tools, params: dict, re
     except OSError as e:  # не запустился: чаще всего память заполнена или аргументы слишком длинны
         raise ProviderError("server", provider=pname, model=cand.model, message=f"Claude Code не запустился: {str(e)[:200]}") from None
     finally:
+        if secret_dir:
+            shutil.rmtree(secret_dir, ignore_errors=True)
         calls = bridge.calls(token) if token else 0
         if token:
             bridge.close(token)

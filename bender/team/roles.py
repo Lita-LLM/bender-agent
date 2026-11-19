@@ -30,7 +30,7 @@ TOOL_CAPS = {
     "mail_list": ("net.read",), "mail_read": ("net.read",), "mail_ask": ("net.read", "team.spawn"), "mail_send": ("msg.send",),
     "skill_read": ("fs.read",), "skill_run": ("skill.run", "exec"), "module_info": ("mcp.call",), "module_send": ("mcp.call", "msg.send"),
     "spawn_task": ("team.spawn",), "wait_tasks": ("team.spawn",), "tasks": ("team.spawn",),
-    "status": (), "plan": (), "manner": ("manner",), "ask_owner": (), 'restart':('system.restart',), 'compact':(), 'check_and_update':('update.check',),
+    "status": (), "plan": (), "goal": (), "manner": ("manner",), "ask_owner": (), 'restart':('system.restart',), 'compact':(), 'check_and_update':('update.check',),
     "run_exams": ("exam.run",),
     "learn_skill": ("skill.learn",),
     "propose_tool": ("workshop.propose", "exam.run"),

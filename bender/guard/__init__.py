@@ -22,6 +22,24 @@ class Halted(HumanError):
         super().__init__("halted", "Стоп-кран: агент остановлен хозяином", "Сними стоп в пульте или командой /продолжить.", status=423)
 
 
+async def internal_host(host):
+    """Адрес этого компьютера, внутренней сети или метаданных облака (охота 19.11). Имя проверяется по всем A/AAAA."""
+    import ipaddress
+    from ..workshop.proxy import public_ip
+    host=host.strip('[]')
+    try:
+        ipaddress.ip_address(host);addresses=[host]
+    except ValueError:
+        if host.lower()=='localhost' or host.lower().endswith(('.localhost','.local','.internal','.lan','.home.arpa')):return host
+        try:
+            infos=await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host,None),5)
+        except (OSError,asyncio.TimeoutError,UnicodeError):
+            return ''  # не разрешилось — соединение не состоится и так
+        addresses=[i[4][0] for i in infos]
+    bad=[x for x in addresses if not public_ip(x.split('%')[0])]
+    return bad[0] if bad else ''
+
+
 class Guard:
     def file_send_decision(self, action):
         from ..core.pathutil import within
@@ -149,6 +167,11 @@ class Guard:
                     return d
             except ValueError:
                 return Decision('deny','Некорректный адрес сети.','bad-url',False)
+            if a.capability=='net.read' and target.scheme in ('http','https') and target.hostname and not a.detail.get('internal') and not a.detail.get('configured'):
+                internal=await internal_host(target.hostname)
+                if internal:
+                    from dataclasses import replace
+                    a=replace(a,detail={**(a.detail or {}),'internal':internal})
         try:
             blocked=(a.capability.startswith("fs.") and sealed(self.policy.resolve(a.target),a.capability,self.app.dirs.root)) or updates_command(a) or a.capability.startswith('update.')
         except HumanError:
@@ -257,7 +280,10 @@ class Guard:
             self._record_decision(a,d,session_id)
             return d
         grants = self._turn_grants.get(session_id or "", set())
-        if (a.capability, a.target) in grants or (a.capability, "*") in grants or self.session_granted(a.capability, session_id) or \
+        # После чужого текста кнопка «в этом разговоре» не держится для выноса к чужим — как «Всегда» хозяина (охота 19.11).
+        from .policy import leaks
+        broad = not (a.tainted and leaks(a) and not (a.capability == "msg.send" and a.to_owner))
+        if (a.capability, a.target) in grants or (a.capability, "*") in grants or broad and self.session_granted(a.capability, session_id) or \
                 any(c == a.capability and t not in ("*", a.target) and fnmatch.fnmatch(a.target, t) and not _chained(a) for c, t in grants):
             if a.capability in ("exec", "mcp.connect", "skill.run") and self.app.settings.get("guard", "hardline", True) and hardline_hit(a.target if a.capability == "exec" else a.detail.get("command", "")):
                 pass  # жёсткий список не отменяется ни одобрением, ни полномочиями

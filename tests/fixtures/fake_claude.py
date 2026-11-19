@@ -40,7 +40,7 @@ def main():
                  "--model", "--resume", "--session-id"]
         if not os.environ.get("FAKE_CLAUDE_OLD"):
             flags += ["--include-partial-messages", "--permission-prompts", "--disable-slash-commands", "--system-prompt-snapshot",
-                      "--no-session-persistence", "--restricted", "--effort", "--input-format"]
+                      "--no-session-persistence", "--restricted", "--effort", "--input-format", "--system-prompt-file"]
         print("Usage: claude [options]\n" + "\n".join("  " + f for f in flags))
         return
     if "--version" in sys.argv:
@@ -61,11 +61,20 @@ def main():
         blocks = json.loads(prompt.splitlines()[0])["message"]["content"]
         prompt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         images = [b["source"]["media_type"] for b in blocks if b.get("type") == "image"]
-    cfg = json.loads(arg("--mcp-config", "{}"))
+    raw_cfg = arg("--mcp-config", "{}")
+    secret_modes = {}
+    if not raw_cfg.lstrip().startswith("{"):  # путь к файлу, как у настоящего
+        secret_modes["--mcp-config"] = oct(os.stat(raw_cfg).st_mode & 0o777)
+        raw_cfg = open(raw_cfg, encoding="utf-8").read()
+    cfg = json.loads(raw_cfg)
+    system = arg("--system-prompt")
+    if arg("--system-prompt-file"):
+        secret_modes["--system-prompt-file"] = oct(os.stat(arg("--system-prompt-file")).st_mode & 0o777)
+        system = open(arg("--system-prompt-file"), encoding="utf-8").read()
     srv = (cfg.get("mcpServers") or {}).get("bender") or {}
     url, token = srv.get("url"), (srv.get("headers") or {}).get("Authorization", "")[7:]
     sid = arg("--resume") or arg("--session-id") or str(uuid.uuid4())
-    log = {"argv": sys.argv[1:], "prompt": prompt, "session": sid, "resume": "--resume" in sys.argv, "images": images, "tools": [], "results": [],
+    log = {"argv": sys.argv[1:], "system": system, "secret_modes": secret_modes, "prompt": prompt, "session": sid, "resume": "--resume" in sys.argv, "images": images, "tools": [], "results": [],
            "env": {k: v for k, v in os.environ.items() if k.startswith(("CLAUDE_CODE_DISABLE", "CLAUDE_CODE_EFFORT"))}}
     out({"type": "system", "subtype": "init", "session_id": sid, "model": arg("--model", "default"), "tools": []})
     if plan.get("error"):

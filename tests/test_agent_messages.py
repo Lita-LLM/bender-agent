@@ -103,7 +103,7 @@ class AgentMessagesTest(TempDirCase):
     @async_test
     async def test_loop_stops_at_four_and_main_keeps_its_own_router_context(self):
         async with MindEnv(self.tmp) as env:
-            app,other=self.prepare(env);self.links(app,both=True)
+            app,other=self.prepare(env);self.links(app,both=True);app.settings.set('agent_chat',{'max_depth':4})
             p=app.models.add_provider(name='Для второго',base_url=env.base+'/v1',extra={'is_local':True})
             other.models.set_role('main',[{'provider':p['id'],'model':'script'}])
             env.script([call('message_agent',agent='second',text='Шаг 1',wait=True),

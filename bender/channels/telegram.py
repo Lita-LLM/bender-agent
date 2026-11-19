@@ -787,7 +787,10 @@ class Telegram:
         if msg.get('media_group_id'):
             self._collect_album(msg)
             return
-        try:ctx,sid=self.selected(chat['id'])
+        try:
+            ctx,sid=self.selected(chat['id'])
+            from .telegram_routes import replied
+            ctx,sid=replied(self,chat['id'],msg,ctx,sid)  # ответ на вопрос/сообщение соседа по стае — ему, а не выбранному агенту
         except HumanError as error:
             await self.send(chat['id'],error.title+'. '+error.hint)
             return
@@ -877,6 +880,16 @@ class Telegram:
             if await dispatch(self.commands,ctx,chat['id'],sid,cmd[1:],text.partition(' ')[2].strip()):
                 self.remember(ctx,chat['id'],msg.get('message_id'),sid,'[команда Telegram]','in',source_text='[команда Telegram]',command=True)
                 return
+        # ответ цитатой на карточку вопроса — ответ этому вопросу, чей бы он ни был
+        qid=self._question_for(chat['id'],(msg.get('reply_to_message') or {}).get('message_id')) if not tainted and all(a['kind']=='voice' for a in attachments) else None
+        if qid:
+            card=self.app.questions[qid]['card']
+            try:asker=self.app.agents.get(card.get('agent_id','main'))
+            except HumanError:asker=ctx
+            if self.app.answer(qid,text):
+                asker.journal.write('channel','Telegram: хозяин ответил на вопрос цитатой',actor='owner',data={'question':qid})
+                await self.send(chat['id'],'→ Ответ передан'+('' if asker is ctx and asker.agent_id=='main' else ' «'+str(asker.selfdir.identity().get('name') or asker.agent_id)+'»')+'.')
+                return
         # ход — в фоне: опрос не должен ждать конца хода (иначе кнопка одобрения не дойдёт, пока ход её ждёт)
         quote=msg.get('reply_to_message') or {}
         excerpt=msg.get('quote') or {};external=msg.get('external_reply') or {}
@@ -894,11 +907,13 @@ class Telegram:
                 if saved:saved={**saved,'text':'['+str(other.selfdir.identity().get('name') or other.agent_id)+'] '+str(saved.get('source_text') or saved.get('text') or ''),'source_text':None}
             quote_text=excerpt.get('text') or body(quote) or (saved or {}).get('source_text') or (saved or {}).get('text') or '[медиа; текст цитаты не передан]'
             # Своё слово хозяина (не пересланное) и ответ бота из чистого хода — без обёртки; ход заражается как раньше.
+            # Своё сообщение агента (ответ, уведомление, вопрос) — его слова: они и так в истории, цитата хода не заражает.
+            # Чужим остаётся только то, что несёт чужой текст: пересланное, внешняя цитата, уведомление почты/вебхука/рефлекса (хозяин 19.11).
             if external or not known:foreign=True
             elif known.get('direction')=='in':foreign=bool(known.get('foreign',known.get('tainted')))
-            else:foreign=bool(known.get('tainted'))
+            else:foreign=bool(known.get('foreign'))
             text=append(text,quote_text,channel='Telegram',reference=quote.get('message_id') or external.get('message_id') or 'внешнее',trusted=not foreign)
-            if foreign or known.get('session')!=sid or known.get('tainted'):tainted=True
+            if foreign:tainted=True
         if group and group['context']:
             from ..tools.web import untrusted
             rows='\n'.join(str(row['from'])+' · '+row['name']+': '+row['text'] for row in group['context'])
@@ -1198,20 +1213,24 @@ class Telegram:
             text = str(ev.get("text") or "")
             if not text.startswith(icon):
                 text = f"{icon} {text}"
-            self._bg_task(self._notice(chat, text, ctx, ev.get('session'), agent=aid!='*'))
+            self._bg_task(self._notice(chat, text, ctx, ev.get('session'), agent=aid!='*', foreign=ev.get('kind') in ('mail','hook','reflex') or bool(ev.get('untrusted'))))
         elif t == "approval" and s.get("approvals", True):
             c = ev.get("card") or {}
+            from ..guard.cardtext import action_text
+            what, cut = action_text(c)
             row = [{"text": "Да, один раз", "callback_data": f"ap:{c['id']}:once"}] + ([{"text": "В этом разговоре", "callback_data": f"ap:{c['id']}:task"}] if c.get("can_session", True) else [])
             row2 = ([{"text": ("Всегда: " + str(c.get("remember") or "такое"))[:60], "callback_data": f"ap:{c['id']}:always"}] if c.get("can_remember") else []) + [{"text": "Нет", "callback_data": f"ap:{c['id']}:deny"}]
+            if cut:row, row2 = [], [{"text": "Нет", "callback_data": f"ap:{c['id']}:deny"}]  # обрезанное не одобряется вслепую (охота 19.11)
             # Что именно одобряется — блоком кода: разметка из команды ([docs](…), **…**) не прячет её часть (охота 16.11).
-            what = str(c.get('summary') or c.get('what') or '').replace("```", "ʼʼʼ")
-            text = f"⚠ Предохранитель спрашивает:\n```\n{what}\n```\n{c.get('reason') or ''}" + ("\nВ этом ходе агент читал недоверенное." if c.get("tainted") else "")
-            self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [row, row2]))
+            what = what.replace("```", "ʼʼʼ")
+            text = f"⚠ Предохранитель спрашивает:\n```\n{what}\n```\n{c.get('reason') or ''}" + ("\nВ этом ходе агент читал недоверенное." if c.get("tainted") else "") \
+                + ("\nДействие длинное и показано не целиком — одобрить можно только в пульте." if cut else "")
+            self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [r for r in (row, row2) if r]))
         elif t == "question" and s.get("approvals", True):
             c = ev.get("card") or {}
             opts = c.get("options") or []
             buttons = [[{"text": o[:60], "callback_data": f"q:{c['id']}:{i}"}] for i, o in enumerate(opts[:8])]
-            self._bg_task(self._card(c["id"], chat, self._card_signed(c, f"❓ {c.get('question')}" + ("" if opts else "\n(ответь сообщением)")), buttons or None))
+            self._bg_task(self._card(c["id"], chat, self._card_signed(c, f"❓ {c.get('question')}" + ("" if opts else "\n(ответь сообщением или цитатой)")), buttons or None, route=(c.get("agent_id","main"), c.get("session"))))
         elif t in ("approval_done", "question_done"):
             ref = self._cards.pop(str(ev.get("id")), None)
             if ref:
@@ -1235,12 +1254,12 @@ class Telegram:
         head=self.badge(ctx);text=str(text)
         return text if not head or text.startswith(head) else head+text
 
-    async def _notice(self, chat, text, ctx, sid=None, *, agent=True):
+    async def _notice(self, chat, text, ctx, sid=None, *, agent=True, foreign=False):
         """Уведомление запоминается как сказанное агентом: ответ на него придёт с текстом, а не «медиа»."""
         if agent:text=self.signed(ctx,text)
         mid=await self.send(chat,text)
-        # Уведомления несут тему письма, тело вебхука, вывод рефлекса: при цитате это чужой текст.
-        self.remember(ctx,chat,mid,sid or ctx.main_session(),text,'out',tainted=True)
+        # Тема письма, тело вебхука, вывод рефлекса — чужой текст; пульс, напоминание, задача — слова самого агента.
+        self.remember(ctx,chat,mid,sid or ctx.main_session(),text,'out',tainted=foreign,foreign=foreign)
 
     async def _skill_notice(self,chat,message,agent_ctx=None):
         data=message.get("data") or {}
@@ -1257,7 +1276,18 @@ class Telegram:
         except HumanError:ctx=None
         return self.signed(ctx,text)
 
-    async def _card(self, cid: str, chat: int, text: str, buttons) -> None:
+    def _question_for(self, chat, message):
+        """Открытый вопрос, карточку которого хозяин процитировал."""
+        if not message:return None
+        return next((cid for cid,(c,m) in list(self._cards.items()) if m==message and int(c)==int(chat) and cid in self.app.questions),None)
+
+    async def _card(self, cid: str, chat: int, text: str, buttons, route=None) -> None:
         mid = await self.send(chat, text, buttons=buttons)
         if mid:
             self._cards[cid] = (chat, mid)
+            if route:
+                # карточка запоминается за спросившим агентом: ответ на неё цитатой (и после закрытия вопроса) идёт ему
+                try:
+                    asker=self.app.agents.get(route[0] or 'main')
+                    self.remember(asker,chat,mid,route[1] or asker.main_session(),text,'out')
+                except HumanError:pass

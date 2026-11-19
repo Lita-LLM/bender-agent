@@ -102,7 +102,9 @@ class ConversationTest(TempDirCase):
             await self.until(lambda:env.app.store.messages(env.sid))
             said=[m['content'] for m in env.app.store.messages(env.sid) if m['role']=='user'][-1]
             self.assertIn('проверил чат, новых вопросов нет',str(said));self.assertNotIn('медиа',str(said))
-            # Уведомление соседа по стае: ответ идёт выбранному агенту, но с текстом и именем автора.
+            ownq=[m for m in env.app.store.messages(env.sid) if m['role']=='user'][-1]
+            self.assertFalse(ownq['meta'].get('untrusted'))  # цитата своего уведомления агента ход не заражает (хозяин 19.11)
+            # Уведомление соседа по стае: ответ цитатой идёт ему самому, а не выбранному агенту (хозяин 19.11).
             env.app.agents.create('Луна',agent_id='luna',awaken=False)
             env.app.agents.get('luna').bus.publish({'type':'notify','kind':'pulse','text':'💓 Сделал сам: чат проверила'})
             mine=lambda word:[e['message_id'] for e in env.fake.state.tg_sent if word in str(e)]
@@ -111,9 +113,34 @@ class ConversationTest(TempDirCase):
             env.script([{'text':'Это Луна.'}])
             await env.app.telegram._handle({'message':{'message_id':1003,'from':{'id':42},'chat':{'id':42,'type':'private'},'text':'А это?',
                 'reply_to_message':{'message_id':other}}})
-            await self.until(lambda:'А это?' in str([m['content'] for m in env.app.store.messages(env.sid)]))
-            said=[m['content'] for m in env.app.store.messages(env.sid) if m['role']=='user'][-1]
-            self.assertIn('[Луна] 💓 Сделал сам: чат проверила',str(said))
+            luna=env.app.agents.get('luna');lsid=luna.main_session()
+            await self.until(lambda:'А это?' in str([m['content'] for m in luna.store.messages(lsid)]))
+            said=[m for m in luna.store.messages(lsid) if m['role']=='user' and 'А это?' in str(m['content'])][-1]
+            self.assertIn('чат проверила',str(said['content']));self.assertEqual(said['meta'].get('actor'),'owner')
+            self.assertNotIn('А это?',str([m['content'] for m in env.app.store.messages(env.sid)]))
+
+    @async_test
+    async def test_quoted_answer_to_neighbour_question_goes_to_asker(self):
+        # Хозяин отвечает цитатой на вопрос соседа по стае, пока выбран главный: ответ — спросившему, без пересказа главным.
+        async with MindEnv(self.tmp) as env:
+            await self._up(env,owner=True)
+            env.app.agents.create('Луна',agent_id='luna',awaken=False)
+            luna=env.app.agents.get('luna')
+            asking=asyncio.ensure_future(luna.ask_owner('Можно удалить старые логи?',[],session_id=luna.main_session(),timeout=30))
+            await self.until(lambda:[e for e in env.fake.state.tg_sent if 'старые логи' in str(e)])
+            card=[e for e in env.fake.state.tg_sent if 'старые логи' in str(e)][-1]['message_id']
+            await env.app.telegram._handle({'message':{'message_id':2001,'from':{'id':42},'chat':{'id':42,'type':'private'},'text':'Да, удаляй',
+                'reply_to_message':{'message_id':card}}})
+            self.assertEqual(await asyncio.wait_for(asking,5),'Да, удаляй')
+            await self.until(lambda:[e for e in env.fake.state.tg_sent if 'Ответ передан' in str(e)])
+            self.assertNotIn('Да, удаляй',str([m['content'] for m in env.app.store.messages(env.sid)]))
+            # вопрос закрыт — новая цитата той же карточки становится обычным словом хозяина в чате Луны
+            env.script([{'text':'Поняла.'}])
+            await env.app.telegram._handle({'message':{'message_id':2002,'from':{'id':42},'chat':{'id':42,'type':'private'},'text':'И кэш тоже',
+                'reply_to_message':{'message_id':card}}})
+            await self.until(lambda:'И кэш тоже' in str([m['content'] for m in luna.store.messages(luna.main_session())]))
+            said=[m for m in luna.store.messages(luna.main_session()) if 'И кэш тоже' in str(m['content'])][-1]
+            self.assertEqual(said['meta'].get('actor'),'owner');self.assertFalse(said['meta'].get('untrusted'))
 
     @async_test
     async def test_owner_quote_and_explicit_final_reply(self):

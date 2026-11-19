@@ -610,6 +610,9 @@ class Userbot:
             if word not in YES:
                 await self.send_owner('Не понял ответ. Напиши: да, да в разговоре, да всегда или нет.')
                 return True
+            if card.get('cut') and YES[word] != 'deny':
+                await self.send_owner('Это действие показано не целиком — одобрить можно только в пульте. Здесь — только «нет».')
+                return True
             done = self.ctx.guard.respond(pid, YES[word], by='owner')
             await self.send_owner('→ ' + ({'once': 'Разрешено', 'task': 'Разрешено в этом разговоре', 'always': 'Разрешено всегда', 'deny': 'Отказано'}[YES[word]] if done else 'Уже решено'))
         else:
@@ -653,9 +656,12 @@ class Userbot:
                     await self.send_owner(item[1])
                 elif item[0] == 'approval':
                     c = item[1]
-                    text = ('⚠ Предохранитель спрашивает: ' + str(c.get('summary') or c.get('what')) + '\n' + str(c.get('reason') or '') + ('\nВ этом ходе агент читал недоверенное.' if c.get('tainted') else '')
-                            + '\n\nОтветь на это сообщение: да · да в разговоре · ' + ('да всегда · ' if c.get('can_remember') else '') + 'нет')
-                    self.cards[str(c['id'])] = {'kind': 'approval', 'mid': await self.send_owner(text)}
+                    from ..guard.cardtext import action_text
+                    what, cut = action_text(c)
+                    text = ('⚠ Предохранитель спрашивает: ' + what + '\n' + str(c.get('reason') or '') + ('\nВ этом ходе агент читал недоверенное.' if c.get('tainted') else '')
+                            + ('\n\nДействие показано не целиком — одобрить можно только в пульте; здесь ответь «нет», чтобы отказать.' if cut else
+                               '\n\nОтветь на это сообщение: да · да в разговоре · ' + ('да всегда · ' if c.get('can_remember') else '') + 'нет'))
+                    self.cards[str(c['id'])] = {'kind': 'approval', 'cut': cut, 'mid': await self.send_owner(text)}
                 elif item[0] == 'question':
                     c = item[1]
                     options = [str(o) for o in (c.get('options') or [])][:8]
@@ -704,6 +710,12 @@ class Userbot:
             if mine and taint and self.chat_of(session) != cid and (action.capability == 'net.read' or (action.detail or {}).get('op') in ('edit', 'delete', 'pin', 'unpin')):
                 # Ход по чужому чату не читает, не пересылает и не стирает переписку хозяина с агентом (охота 16.11).
                 return Decision('ask', 'Ход читал недоверенное в другом чате, а это личная переписка хозяина.', 'userbot-owner-chat', False)
+            if cid == 777000 and action.capability == 'net.read':
+                # служебный чат Telegram: коды входа в аккаунт — только с подтверждением, даже при полном доверии (охота 19.11)
+                return Decision('ask', 'Служебный чат Telegram с кодами входа: чтение подтверждает хозяин.', 'userbot-service', False)
+            if action.capability == 'net.read' and taint and not mine and self.chat_of(session) != cid:
+                # ход по чужому сообщению не выносит переписку других чатов туда, где его попросили (охота 19.11)
+                return Decision('ask', 'Ход читал недоверенное в другом чате, а читать он хочет этот чат. Хозяин подтверждает.', 'userbot-taint-read', False)
             if action.capability == 'net.read':
                 if mine or row['see'] or cfg.get('trust') == 'all':
                     return Decision('allow', 'Чат открыт хозяином.', 'userbot-chat', False)

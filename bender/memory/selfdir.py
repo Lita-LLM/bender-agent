@@ -266,10 +266,10 @@ def append_diary(root: Path, text: str, *, tainted: bool = False) -> Path:
     body = text.strip()
     if tainted:
         # Пометка стоит на строке: многострочная запись иначе оставляла внедрённые строки «своими» (охота 16.11).
-        body = " ⏎ ".join(part.strip() for part in body.splitlines() if part.strip())
+        body = " ⏎ ".join(part.strip() for part in body.splitlines() if part.strip()).replace("<!--", "<!−−").replace("-->", "−−>")
     line = f"- {time.strftime('%H:%M')} {body}"
     if tainted:
-        line += " <!-- source: untrusted -->"
+        line = f"<!-- source: untrusted -->\n{line} <!-- source: untrusted -->"
     with p.open("a", encoding="utf-8") as fh:
         fh.write(head + line + "\n")
     return p

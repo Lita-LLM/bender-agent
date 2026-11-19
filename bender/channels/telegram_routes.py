@@ -18,6 +18,20 @@ def selected(tg,chat):
     return ctx,sid
 
 
+def replied(tg,chat,msg,ctx,sid):
+    """Ответ цитатой на сообщение другого агента (или другого разговора) уходит туда, откуда сообщение, а не выбранному агенту.
+    Выбор хозяина не меняется: это адрес одного ответа."""
+    quote=msg.get('reply_to_message') or {}
+    if not quote.get('message_id') or msg.get('external_reply') or msg.get('forward_origin'):return ctx,sid
+    route=tg.app.store.meta_get('telegram:message_routes',{}).get(str(int(chat))+':'+str(quote['message_id'])) or {}
+    if not route.get('agent'):return ctx,sid
+    try:other=tg.app.agents.get(route['agent'])
+    except HumanError:return ctx,sid
+    target=route.get('session');row=other.store.session(target) if isinstance(target,str) else None
+    if not row or row['meta'].get('archived') or row['kind'] not in ('main','chat','imported'):target=other.main_session()
+    return other,target
+
+
 def choose(tg,chat,ctx,sid=None):
     sid=sid or ctx.main_session();row=ctx.store.session(sid)
     if not row or row['meta'].get('archived') or row['kind'] not in ('main','chat','imported'):

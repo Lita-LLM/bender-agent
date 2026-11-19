@@ -27,7 +27,7 @@ class MindEnv:
         self.app.bus.bind_loop(asyncio.get_running_loop())
         p = self.app.models.add_provider(name="Фейк", kind="openai", base_url=self.base + "/v1", extra={"is_local": True})
         self.app.models.set_role("main", [{"provider": p["id"], "model": "script"}])
-        self.app.settings.set("guard", {"profile": self.profile})
+        self.app.settings.set("guard", {"profile": self.profile, "local_network": True})  # фейковый сервер — на 127.0.0.1
         self.sid = self.app.main_session()
         self.approvals = []
         return self

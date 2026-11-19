@@ -75,6 +75,13 @@ CAPS = {
 EXFIL = {"exec", "screen.act", "net.send", "msg.send", "memory.core", "settings", "manner", "schedule", "self.code", "self.rules", "secret.use", "mcp.call", "mcp.connect", "skill.run", "agent.describe"}
 # Профиль «Доверие»: заражённый ход спрашивает только то, что прямо уносит данные к чужим.
 EXFIL_TRUST = {"net.send", "msg.send", "secret.use"}
+
+
+def leaks(a) -> bool:
+    """Прямой вынос к чужим: отправка, секрет или команда с открытой сетью (охота 19.11: allow_net в «Доверии»)."""
+    return a.capability in EXFIL_TRUST or (a.capability == "exec" and bool((a.detail or {}).get("net")))
+
+
 CHAIN = re.compile(r"[;&|`\n]|\$\(")  # команда из нескольких: правило «программа» на неё не распространяется
 IRREVERSIBLE = {"money", "self.code", "self.rules"}
 
@@ -165,7 +172,8 @@ def is_safe_read_command(command: str) -> bool:
     prog = os.path.basename(parts[0])
     args = parts[1:]
     if prog == "git":
-        return len(parts) >= 2 and parts[1] in SAFE_GIT and not any(p.startswith("--output") or p == "-o" or p.startswith("--ext-diff") for p in parts) \
+        return len(parts) >= 2 and parts[1] in SAFE_GIT and not any(p.startswith(("--output", "--ext-diff", "--textconv", "-c", "--exec-path", "--config-env")) or p == "-o"
+                                                                    or any(_long_prefix(p, o) for o in ("--output", "--ext-diff", "--textconv", "--exec-path", "--config-env")) for p in parts) \
             and _git_read_only(parts[1], parts[2:])
     if any(_risky_option(prog, a) for a in args):
         return False
@@ -188,9 +196,15 @@ RISKY_OPTIONS = {
 }
 
 
+def _long_prefix(arg: str, opt: str) -> bool:
+    """GNU getopt_long принимает любой однозначный префикс: --compress-prog, --outp=, --ext-dif (охота 19.11)."""
+    name = arg.split("=", 1)[0]
+    return opt.startswith("--") and name.startswith("--") and len(name) >= 4 and opt.startswith(name)
+
+
 def _risky_option(prog: str, arg: str) -> bool:
     for opt in RISKY_OPTIONS.get(prog, ()):
-        if arg == opt or arg.startswith(opt + "="):
+        if arg == opt or arg.startswith(opt + "=") or _long_prefix(arg, opt):
             return True
         if not opt.startswith("--") and arg.startswith(opt) and len(opt) == 2:
             return True  # -ofile, -Tdir
@@ -243,7 +257,7 @@ class Policy:
         for a in PROTECTED_ABS:
             if same(path, a):
                 return f"защищённое место: {a}"
-        if "bender-backups" in path.parts:
+        if any(part.casefold() == "bender-backups" for part in path.parts):  # тома без учёта регистра (охота 19.11)
             return "копии данных Бендера (сейф, токены, база) — только через раздел «Бекапы»"
         for name in ("secrets.json", "bender.db", "bender.db-wal", "bender.db-shm", "local", "skills", "modules", "imports", "diary/hermes", "diary/claude", "versions", "workshop", "exams"):
             if _is_within(path, self.data_dir / name):
@@ -379,6 +393,9 @@ class Policy:
                 if place == "self":
                     core = "self.rules" if path.name.upper() == "AGENTS.MD" else "memory.core"
                     return self._decide(replace(a, capability=core, target=str(path)), s)
+                if ".git" in path.parts or path.name in (".gitattributes", ".gitmodules"):
+                    # .git/config и атрибуты задают программы, которые запустит потом «простое» git status/diff (охота 19.11)
+                    return self._decide(replace(a, capability="exec", target="записать " + str(path), detail={**(a.detail or {}), "git_internals": True}), s)
             why = self.protected(path)
             if why:
                 rule = self._rule_for(a)
@@ -394,7 +411,7 @@ class Policy:
             # «Всегда» хозяина держится и после чужого текста (ответ MCP, сайт, письмо) — иначе вторая же
             # команда хода снова спрашивала бы. Не держится только прямая отправка чужим и встречный
             # запрос MCP-сервера к Бендеру (папки, модель, форма) — «все тулы сервера» его не разрешали.
-            blocked = a.tainted and ((cap in EXFIL_TRUST and not (cap == "msg.send" and a.to_owner)) or (cap == "mcp.call" and a.detail.get("server_request") and cap in exfil))
+            blocked = a.tainted and ((leaks(a) and not (cap == "msg.send" and a.to_owner)) or (cap == "mcp.call" and a.detail.get("server_request") and cap in exfil))
             if rule.get("verdict") == "allow" and not blocked and cap not in IRREVERSIBLE:
                 return Decision("allow", f"Правило хозяина: {rule.get('note') or 'разрешено'}.", f"owner-rule:{rule.get('id')}")
 
@@ -403,7 +420,7 @@ class Policy:
             return Decision("allow", "Ключ поиска используется только для своего поставщика (хост привязан в Сейфе).", "search-key")
 
         # 5. заражённый ход
-        if a.tainted and cap in exfil and not (cap == "msg.send" and a.to_owner):
+        if a.tainted and (cap in exfil or leaks(a)) and not (cap == "msg.send" and a.to_owner):
             return Decision("ask", "В этом ходе агент читал недоверенное (сеть, чужие сообщения, внешние тулы). "
                                    "Действие, которым можно вынести данные или закрепить чужую волю, решает хозяин.", "taint")
 
@@ -454,6 +471,9 @@ class Policy:
         if cap in ("screen.look", "screen.act"):
             return Decision("ask", "Окно на экране хозяина: " + ("посмотреть." if cap == "screen.look" else "нажать или напечатать.") + " Профиль этого не разрешает сам.", name)
         if cap == "net.read":
+            if a.detail.get("internal") and a.tainted and not s.get("local_network", False):
+                return Decision("ask", f"Адрес {a.detail['internal']} — этот компьютер, домашняя сеть или метаданные облака (роутер, службы, ключи). "
+                                       "Чужой текст мог попросить заглянуть туда.", "internal-network")
             return Decision("allow", "Чтение из сети (дальше ход считается заражённым).", name)
         if cap == "net.send":
             return Decision("allow", "Профиль «Доверие».", name) if level >= 2 else Decision("ask", "Отправка данных в сеть.", name)

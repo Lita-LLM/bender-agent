@@ -73,6 +73,10 @@ def for_app(agent_ctx, *, owner=False):
     else:info["title"] += " Лимиты ресурсов POSIX включены." if enabled else " Лимиты ресурсов не применяются."
     if hasattr(agent_ctx, 'dirs') and hasattr(agent_ctx, 'host'):
         info['data_root'] = str(agent_ctx.host.dirs.root)
+        try:  # хранилища бекапов лежат вне папки данных, но несут копии сейфа и базы (охота 19.11)
+            info['hidden_roots'] = [str(p) for p in agent_ctx.host.backups.roots() if Path(p).is_dir()]
+        except Exception:  # noqa: BLE001 — нет раздела бекапов или он не настроен
+            info['hidden_roots'] = []
         info['agent_read'] = [str(getattr(agent_ctx.dirs, name)) for name in ('self_dir', 'diary', 'skills')]
         if getattr(agent_ctx,'_task_agent',None):info['agent_read'] += list(map(str,agent_ctx._task_agent.read_dirs()))
         if hasattr(agent_ctx.host, 'agents'):
@@ -115,6 +119,9 @@ def wrap(command: str, *, info: dict, work_dir: Path, allow_net: bool, read_dirs
             args+=['--ro-bind',str(path),str(path)]
         if info.get('data_root'):
             args += ['--tmpfs', info['data_root']]
+        if not info.get('owner_process'):
+            for hidden in info.get('hidden_roots', []):
+                args += ['--tmpfs', str(canonical(hidden))]
             for path in info.get('agent_read', []): args += ['--ro-bind', path, path]
         args += ["--bind" if info.get("write_work", True) else "--ro-bind", work, work, "--chdir", str(cwd or work), "--die-with-parent", "--new-session", "--unshare-all"]
         if allow_net:

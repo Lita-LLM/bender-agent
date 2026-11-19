@@ -215,7 +215,7 @@ def memory_hints(agent_ctx, text: str, session_id: str | None = None, since_ts: 
 NOTE_REFRESH = 300  # секунд: время в приставке хода обновляется не чаще, чтобы не ломать кэш провайдера
 
 
-def runtime_note(agent_ctx, channel: str, tainted: bool = False, at: float | None = None) -> str:
+def runtime_note(agent_ctx, channel: str, tainted: bool = False, at: float | None = None, sid: str | None = None) -> str:
     """Приставка к последнему сообщению хозяина. at — момент, который показать (ход фиксирует его,
     см. loop: смена минуты посреди хода заставляла провайдера пересчитывать все шаги после этого сообщения)."""
     t = time.localtime(at)
@@ -231,6 +231,9 @@ def runtime_note(agent_ctx, channel: str, tainted: bool = False, at: float | Non
         to_me, from_me = host.agents.assignments.counts(agent_ctx.agent_id)
         if to_me or from_me:
             note += f" · поручения: тебе {to_me}, от тебя {from_me} (тул assignments)"
+    if sid:
+        from .goals import line
+        note += line(agent_ctx, sid)
     from .manners import reminder
     note += reminder(agent_ctx)
     return note + "]\n"

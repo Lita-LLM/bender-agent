@@ -100,6 +100,9 @@ class Mind:
         if actor == "owner" and home in ("telegram", "matrix", "userbot", "pult", "terminal"):
             if (self.app.store.session(session_id) or {}).get("meta", {}).get("home_channel") != home:
                 self.app.store.update_session(session_id, meta={"home_channel": home})
+        if actor == "owner" and not unattended:
+            from . import goals
+            goals.wake(self.app, session_id)  # хозяин ответил — заблокированная цель снова в работе
         if actor == "owner" and home in ("telegram", "speaker") and getattr(self.app.host, '_handoffs', None):
             from ..agents.handoff import take
             text = take(self.app.host, self.app.agent_id, home) + text  # первая реплика после hand_over
@@ -503,7 +506,7 @@ class Mind:
                     now = time.time()
                     if now - float(turn.state.get('_note_at') or 0) >= ctxmod.NOTE_REFRESH:
                         turn.state['_note_at'] = now
-                    note = skill_context + ctxmod.runtime_note(agent_ctx, turn.channel, turn.tainted, turn.state['_note_at']) + (turn.hints or "")
+                    note = skill_context + ctxmod.runtime_note(agent_ctx, turn.channel, turn.tainted, turn.state['_note_at'], sid=sid) + (turn.hints or "")
                     turn.state['_note'] = note  # CLI-движку (Claude Code): он берёт реплики из базы, без этой приставки
                     if isinstance(m.get("content"), str):
                         m["content"] = note + m["content"]
@@ -578,6 +581,13 @@ class Mind:
                 final_text = res.text or ""
                 if self._flush_inbox(turn):
                     continue  # пришло новое сообщение, пока модель отвечала — продолжаем ход с ним
+                if turn.system is None and not turn.stopped and not agent_ctx.guard.halted:
+                    from . import goals
+                    push = goals.nudge(agent_ctx, sid, int(agent_ctx.settings.get('agent', 'goal_rounds', 30) or 0))
+                    if push:
+                        self.observe(sid, push, channel=turn.channel, continue_turn=True, meta={'goal': True, 'display': '🎯 Продолжаю к цели'})
+                        if self._flush_inbox(turn):
+                            continue
                 break
             # тулы
             media_parts=[]
@@ -627,6 +637,9 @@ class Mind:
                     self._save_event(sid, "skill", "💾 Навык: " + skill["name"] + ("" if skill["enabled"] else " — черновик в карантине"), skill)
                 self.publish(sid, {"type": "tool_end", "id": call.id, "name": call.name, "ok": ok, "summary": summary, "tainted": tainted,
                                    "content": out_text[:4000]})
+            if turn.system is None:
+                from . import goals
+                goals.progress(agent_ctx, sid)
             if media_parts:
                 # Нельзя разрывать пакет assistant/tool сообщением user, даже при нескольких тулах с вложениями.
                 mmsg={'role':'user','content':media_parts}

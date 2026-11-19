@@ -106,7 +106,13 @@ def register(reg) -> None:
                 rows = heart.jobs.history(j.id)
                 lines = [f"- {time.strftime('%d.%m %H:%M', time.localtime(r['started']))}: {r['status']}" + (f" — {r['summary'][:200]}" if r["summary"] else "")
                          for r in rows]
-                return ToolResult("\n".join(lines) or "Запусков ещё не было.", summary=f"история «{j.name}»")
+                from ..heart import UNTRUSTED_MARK
+                dirty = any(str(r["summary"] or "").startswith(UNTRUSTED_MARK) for r in rows)
+                text = "\n".join(lines) or "Запусков ещё не было."
+                if dirty:
+                    from .web import untrusted
+                    text = untrusted("история задачи: её ход читал чужой текст", text)
+                return ToolResult(text, summary=f"история «{j.name}»", tainted=dirty)
             if action in ('run','resume') and j.kind in ('agent','reflex'):await api_background(ctx,j.public())
             await ctx.check("schedule", f"{action}: {j.name}", f"{ {'remove': 'удалить', 'pause': 'приостановить', 'resume': 'возобновить', 'run': 'запустить сейчас'}[action] } задачу «{j.name}»")
             if action == "remove":
@@ -118,8 +124,13 @@ def register(reg) -> None:
             if j.kind == "agent" and j.action.get("session", "main") == "main" and agent_ctx.mind.running(agent_ctx.main_session()):
                 return ToolResult("Сейчас идёт ход в главном разговоре — запусти задачу в отдельной сессии или подожди.", ok=False, summary="занято")
             res = await heart.fire(j, manual=True)
-            return ToolResult(f"Запущено: {res.get('status')}" + (f" — {res.get('summary')}" if res.get("summary") else "") + (f" ({res.get('error')})" if res.get("error") else ""),
-                              ok=res.get("status") == "ok", summary=f"▶ «{j.name}»")
+            from ..heart import UNTRUSTED_MARK
+            dirty = str(res.get("summary") or "").startswith(UNTRUSTED_MARK)
+            text = f"Запущено: {res.get('status')}" + (f" — {res.get('summary')}" if res.get("summary") else "") + (f" ({res.get('error')})" if res.get("error") else "")
+            if dirty:
+                from .web import untrusted
+                text = untrusted("итог задачи: её ход читал чужой текст", text)
+            return ToolResult(text, ok=res.get("status") == "ok", summary=f"▶ «{j.name}»", tainted=dirty)
         return ToolResult("Ошибка: action — list, add, remove, pause, resume, run или history.", ok=False, summary="плохое действие")
 
     @reg.tool("intent", "Намерение", group="heart")
