@@ -153,3 +153,37 @@ class MediumFixesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Policy(work_dir=Path(d), data_dir=Path(d) / 'data', get_settings=lambda: {}, get_rules=lambda: [])
             self.assertTrue(p.protected(Path('/mnt/disk/bender-backups/objects/ab/cd')))
+
+
+class HealHistoryTest(unittest.TestCase):
+    """Вызов тула без ответа (ход оборван перезапуском) ломал разговор навсегда: ChatGPT отвечал
+    «No tool output found for function call» на любой следующий запрос."""
+
+    def test_unanswered_call_gets_interrupted_result(self):
+        from bender.mind.compact import heal, INTERRUPTED
+        msgs = [{"role": "user", "content": "обнови"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "name": "update", "arguments": {}},
+                                                                     {"id": "b", "name": "x", "arguments": {}}]},
+                {"role": "tool", "tool_call_id": "a", "content": "ok"},
+                {"role": "user", "content": "что нового?"}]
+        out = heal(msgs)
+        self.assertEqual([m["role"] for m in out], ["user", "assistant", "tool", "tool", "user"])
+        self.assertEqual(out[3]["tool_call_id"], "b")
+        self.assertEqual(out[3]["content"], INTERRUPTED)
+
+    def test_trailing_call_and_stray_result(self):
+        from bender.mind.compact import heal
+        msgs = [{"role": "tool", "tool_call_id": "z", "content": "сирота"},
+                {"role": "user", "content": "привет"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "name": "x", "arguments": {}}]}]
+        out = heal(msgs)
+        self.assertEqual([m["role"] for m in out], ["user", "assistant", "tool"])
+        self.assertTrue(out[-1]["is_error"])
+
+    def test_complete_history_untouched(self):
+        from bender.mind.compact import heal
+        msgs = [{"role": "user", "content": "a"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "name": "x", "arguments": {}}]},
+                {"role": "tool", "tool_call_id": "c", "content": "r"},
+                {"role": "assistant", "content": "готово"}]
+        self.assertEqual(heal(msgs), msgs)

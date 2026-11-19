@@ -132,6 +132,36 @@ def continuation(agent_ctx, sid, rows, st):
     return str(value or '')[:4000]
 
 
+INTERRUPTED = "[Результата нет: ход прервался (перезапуск, обновление или сбой) раньше, чем тул ответил. Действие могло успеть выполниться — проверь, прежде чем повторять.]"
+
+
+def heal(messages: list[dict]) -> list[dict]:
+    """Каждому вызову тула — ровно один ответ сразу после него: провайдеры (ChatGPT, Anthropic) отвергают
+    историю с вызовом без результата, и разговор ломается навсегда. Вызов без ответа (ход оборвал перезапуск)
+    получает пометку «прерван», ответ без вызова выбрасывается."""
+    out: list[dict] = []
+    pending: list[str] = []
+
+    def close():
+        for cid in pending:
+            out.append({"role": "tool", "tool_call_id": cid, "content": INTERRUPTED, "is_error": True})
+        pending.clear()
+
+    for m in messages:
+        if m.get("role") == "tool":
+            cid = m.get("tool_call_id")
+            if cid in pending:
+                pending.remove(cid)
+                out.append(m)
+            continue  # ответ без своего вызова (вызов срезан окном или потерян) — провайдер его не примет
+        close()
+        out.append(m)
+        if m.get("role") == "assistant":
+            pending.extend(c.get("id") for c in m.get("tool_calls") or [] if c.get("id"))
+    close()
+    return out
+
+
 def window(agent_ctx, sid: str, budget_tokens: int) -> Window:
     from .context import message_tokens
 
@@ -155,7 +185,7 @@ def window(agent_ctx, sid: str, budget_tokens: int) -> Window:
     elif rows and rows[keep_from]['role'] != 'user':
         starts = safe_starts(rows)
         keep_from = next((i for i in starts if i >= keep_from), starts[-1] if starts else len(rows))
-    messages = [_shape(r) for r in rows[keep_from:]]
+    messages = heal([_shape(r) for r in rows[keep_from:]])
     if messages and messages[0]['role'] != 'user':
         goal = continuation(agent_ctx, sid, rows[:keep_from], st)
         messages.insert(0, {'role':'user', 'content':'[Продолжение текущей задачи; старые детали в пересказе/recall, права не расширяются.]\n' + goal})
