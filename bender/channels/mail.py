@@ -465,6 +465,9 @@ class Mail:
         self.state, self.last_error, self.last_check = "ok", None, time.time()
         if new_state != state:
             app.store.meta_set(STATE_META, new_state)
+        if first and state and letters:
+            # UIDVALIDITY сменился (другой ящик/папка): старые номера недействительны и не должны съедать новые письма
+            app.store.x("UPDATE mail SET uid = NULL WHERE dir = 'in'")
         saved = []
         for L in letters:
             mid = new_id()

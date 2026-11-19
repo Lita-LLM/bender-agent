@@ -249,3 +249,16 @@ class AdoptTest(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FinishKeepsPauseTest(TempDirCase):
+    @async_test
+    async def test_pause_during_run_survives_finish(self):
+        async with MindEnv(self.tmp) as env:
+            heart = env.app.heart
+            job = heart.add("повтор", kind="remind", text="x", every="1 hour")
+            stale = heart.jobs.get(job.id)
+            heart.jobs.update(job.id, enabled=False)
+            done = heart.jobs.finish(stale, started=time.time(), status="ok")
+            self.assertFalse(heart.jobs.get(job.id).enabled)
+            self.assertFalse(done.enabled)

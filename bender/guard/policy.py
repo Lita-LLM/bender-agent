@@ -243,6 +243,8 @@ class Policy:
         for a in PROTECTED_ABS:
             if same(path, a):
                 return f"защищённое место: {a}"
+        if "bender-backups" in path.parts:
+            return "копии данных Бендера (сейф, токены, база) — только через раздел «Бекапы»"
         for name in ("secrets.json", "bender.db", "bender.db-wal", "bender.db-shm", "local", "skills", "modules", "imports", "diary/hermes", "diary/claude", "versions", "workshop", "exams"):
             if _is_within(path, self.data_dir / name):
                 return "служебные данные Бендера (сейф, база, ключи) — только через свои тулы"

@@ -281,6 +281,8 @@ async def run_claude(router, cand, messages: list[dict], tools, params: dict, re
                                            timeout=float(p.get("timeout") or 1800), on_event=event,**extra)
     except asyncio.TimeoutError:
         raise ProviderError("timeout", provider=pname, model=cand.model, message="Claude Code молчит слишком долго", partial={"actions": bool(token and bridge.calls(token))}) from None
+    except OSError as e:  # не запустился: чаще всего память заполнена или аргументы слишком длинны
+        raise ProviderError("server", provider=pname, model=cand.model, message=f"Claude Code не запустился: {str(e)[:200]}") from None
     finally:
         calls = bridge.calls(token) if token else 0
         if token:

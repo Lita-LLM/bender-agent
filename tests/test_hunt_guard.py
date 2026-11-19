@@ -136,3 +136,20 @@ class MediumFixesTest(unittest.TestCase):
         for name in ('install.ps1', 'clean-reinstall.ps1'):
             if (root / name).exists():
                 self.assertTrue((root / name).read_bytes().startswith(b'\xef\xbb\xbf'), name)
+
+    def test_loopback_skips_proxy(self):
+        import os
+        from unittest import mock
+        from bender.net.http_client import proxy_for
+        with mock.patch.dict(os.environ, {'HTTP_PROXY': 'http://p:1', 'HTTPS_PROXY': 'http://p:1'}):
+            self.assertIsNone(proxy_for('http', '127.0.0.1'))
+            self.assertIsNone(proxy_for('http', 'localhost'))
+            self.assertEqual(proxy_for('http', 'example.com'), 'http://p:1')
+
+    def test_backup_folder_is_protected(self):
+        from pathlib import Path
+        import tempfile
+        from bender.guard.policy import Policy
+        with tempfile.TemporaryDirectory() as d:
+            p = Policy(work_dir=Path(d), data_dir=Path(d) / 'data', get_settings=lambda: {}, get_rules=lambda: [])
+            self.assertTrue(p.protected(Path('/mnt/disk/bender-backups/objects/ab/cd')))

@@ -110,7 +110,7 @@ class Fuel:
         if used is None or not self.app.settings.get('fuel', 'notify', True): return
         end = value['reset_at']
         # Без срока сброса можем гарантировать только одну пару предупреждений за процесс.
-        period = str(int(end)) if end else 'unknown'
+        period = str(int(end // 3600)) if end else 'unknown'  # относительный сброс «через N с» сдвигается с каждым запросом
         cache_key = 'fuel:notice:' + hashlib.sha256(f"{row['provider']}:{row['account']}:{key}:{period}".encode()).hexdigest()
         previous = self.app.store.meta_get(cache_key) or 0
         level = 100 if used >= 100 else 85 if used >= 85 else 0

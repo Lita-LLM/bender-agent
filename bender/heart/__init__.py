@@ -210,6 +210,7 @@ class Heart:
         agent_ctx = self.app
         now = time.time()
         late = 0.0 if manual else max(0.0, now - (self._effective(job) or now))
+        self._quiet.pop(job.id, None)  # отложенное/пропущенное обновляет next_run в базе; старое «тихое» время его не перекрывает
         if not manual:
             if late > LATE_GRACE.get(job.kind, 3600):
                 job = self.jobs.finish(job, started=now, status="missed", summary=f"пропущено: {late_words(late)} — Бендер был выключен или машина спала", late=late)

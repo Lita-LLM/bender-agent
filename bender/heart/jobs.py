@@ -223,11 +223,19 @@ class Jobs:
                late: float = 0.0, now: float | None = None) -> Job:
         """Записать запуск и посчитать следующий. Разовые и исчерпанные — выключаются."""
         now = now or time.time()
+        fresh = self.get(job.id)
+        if fresh is None:
+            return job  # задачу удалили во время хода
+        paused = job.enabled and not fresh.enabled  # хозяин поставил на паузу, пока задача шла
+        if fresh.schedule != job.schedule or fresh.window != job.window:
+            job.schedule, job.window, job.next_run = fresh.schedule, fresh.window, fresh.next_run
         runs = job.runs + (1 if status in ("ok", "error") else 0)
         nxt = next_fire(job.schedule, max(now, job.next_run or now), window=job.window)
         enabled = job.enabled
         if nxt is None or (job.max_runs and runs >= job.max_runs) or (job.expires and nxt > job.expires):
             nxt, enabled = None, False
+        if paused:
+            enabled = False
         with self.store.tx() as db:
             db.execute("INSERT INTO job_runs(job_id, started, finished, status, summary, session_id, late) VALUES(?,?,?,?,?,?,?)",
                        (job.id, started, now, status, summary[:2000], session_id, late))

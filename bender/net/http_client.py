@@ -88,6 +88,8 @@ def _no_proxy_match(host: str, no_proxy: str) -> bool:
 
 def proxy_for(scheme: str, host: str) -> str | None:
     """Адрес прокси из окружения для этого хоста или None."""
+    if host.strip("[]").lower() in ("localhost", "127.0.0.1", "::1") or host.startswith("127."):
+        return None  # свой компьютер всегда напрямую: иначе кука и токен пульта уходят прокси
     no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     if no_proxy and _no_proxy_match(host, no_proxy):
         return None
@@ -483,12 +485,21 @@ class HttpClient:
                 if deadline:
                     read_timeout = max(0.1, min(read_timeout, deadline - time.monotonic()))
                 status_line = await asyncio.wait_for(conn.reader.readuntil(b"\n"), read_timeout)
+                continues = 0
                 while status_line.startswith(b"HTTP/1.1 100") or status_line.startswith(b"HTTP/1.0 100"):
+                    continues += 1
+                    if continues > 8:
+                        raise NetError("protocol", "Сервер бесконечно шлёт «100 Continue»", url=url)
+                    if deadline and time.monotonic() > deadline:
+                        raise asyncio.TimeoutError()
                     while (await asyncio.wait_for(conn.reader.readuntil(b"\n"), read_timeout)) not in (b"\r\n", b"\n"):
-                        pass
+                        if deadline and time.monotonic() > deadline:
+                            raise asyncio.TimeoutError()
                     status_line = await asyncio.wait_for(conn.reader.readuntil(b"\n"), read_timeout)
                 resp_headers = Headers()
                 while True:
+                    if deadline and time.monotonic() > deadline:
+                        raise asyncio.TimeoutError()
                     hl = await asyncio.wait_for(conn.reader.readuntil(b"\n"), read_timeout)
                     if hl in (b"\r\n", b"\n"):
                         break
