@@ -259,6 +259,7 @@ class Mind:
             if turn.unattended:
                 lane = agent_ctx.host.agents.background()
                 await lane.__aenter__()
+                turn.started = time.monotonic()  # срок безлюдного хода — с момента, как ему досталось место (A36)
                 slot = lane
                 from ..agents.manager import BACKGROUND
                 turn.state['_background_lease']=BACKGROUND.get()

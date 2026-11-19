@@ -18,6 +18,7 @@ class RichFormatError(ValueError):
 def _inline(text):
     # Код и цели явных ссылок не трогаем. Медиа-синтаксис превращаем в ссылку.
     text=re.sub(r'!\[([^\[\]]*)\]\(([^)\n]+)\)',lambda m:'['+(m[1] or 'Файл')+']('+m[2]+')',text)
+    text=re.sub(r'!(?=\[)',r'\\!',text)  # оставшийся признак картинки (вложенные скобки) — не медиа (A38)
     pieces=re.split(r'(`+[^`\n]*`+|\[[^\[\]\n]*\]\([^)\n]*\))',text)
     for n in range(0,len(pieces),2):
         value=pieces[n]

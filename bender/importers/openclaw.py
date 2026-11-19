@@ -406,7 +406,8 @@ def _content(c) -> tuple[str, list[tuple[str, str]]]:
 
 def _ts(e: dict, m: dict) -> float:
     v = m.get("timestamp")
-    if isinstance(v, (int, float)) and v > 0:
+    import math
+    if isinstance(v, (int, float)) and math.isfinite(v) and 0 < v < 1e14:  # запредельная метка не роняет весь предпросмотр (A54)
         return v / 1000 if v > 1e11 else float(v)
     raw = e.get("timestamp")
     if isinstance(raw, str):
@@ -414,7 +415,7 @@ def _ts(e: dict, m: dict) -> float:
             from datetime import datetime
 
             return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
     return 0.0
 

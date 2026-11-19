@@ -83,7 +83,10 @@ async def flags(exe, *, env=None, cwd=None,protection=None):
     key = (tuple(exe), path, stamp)
     if key not in _FLAGS:
         code, text = await probe(exe + ["--help"], timeout=20, env=env, cwd=cwd,protection=protection)
-        _FLAGS[key] = frozenset(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", text)) if code == 0 else frozenset()
+        found = frozenset(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", text)) if code == 0 else frozenset()
+        if not found:
+            return found  # неудачную пробу (таймаут первого запуска) не запоминаем навсегда
+        _FLAGS[key] = found
     return _FLAGS[key]
 
 

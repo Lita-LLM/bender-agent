@@ -418,8 +418,23 @@ class Guard:
         if not text:
             return text
         # Длинные первыми: если один секрет — часть другого, короткий не должен оставить хвост длинного (охота 16.11).
-        for v in sorted(set(self.app.secrets.values()), key=len, reverse=True):
-            if v and v in text:
+        import json as _json
+        values = set()
+        for v in self.app.secrets.values():
+            if not v:
+                continue
+            values.add(v)
+            escaped = _json.dumps(v, ensure_ascii=False)[1:-1]  # секрет внутри JSON-строки с \" или \\ (B21)
+            if escaped != v:
+                values.add(escaped)
+            if v.lstrip().startswith("{"):
+                try:
+                    values.update(x for x in _json.loads(v).values() if isinstance(x, str) and len(x) >= 8)
+                except (ValueError, AttributeError):
+                    pass
+        # Длинные первыми: если один секрет — часть другого, короткий не должен оставить хвост длинного (охота 16.11).
+        for v in sorted(values, key=len, reverse=True):
+            if v in text:
                 text = text.replace(v, "[секрет скрыт]")
         return text
 

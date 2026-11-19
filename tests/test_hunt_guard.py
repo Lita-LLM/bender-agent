@@ -313,3 +313,23 @@ class Hunt1911CoreTest(TempDirCase):
         p=self.tmp/'unit.service';p.write_text('a');os.chmod(p,0o644)
         atomic_write(p,b'b')
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode),0o644)
+
+
+class Hunt1911LowTest(TempDirCase):
+    def test_page_charset_and_proxy_scheme(self):
+        import os
+        from unittest.mock import patch
+        from bender.tools.web import decode_page
+        from bender.net.http_client import proxy_for
+        self.assertEqual(decode_page('Привет'.encode('cp1251'), 'text/html; charset=windows-1251'), 'Привет')
+        self.assertEqual(decode_page(b'<meta charset="koi8-r">' + 'Мир'.encode('koi8-r'), 'text/html')[-3:], 'Мир')
+        with patch.dict(os.environ, {'HTTP_PROXY': 'proxy:3128', 'NO_PROXY': ''}):
+            self.assertEqual(proxy_for('http', 'example.org'), 'http://proxy:3128')
+
+    def test_scrub_json_escaped_secret(self):
+        app = App(self.tmp / 'data')
+        try:
+            app.secrets.set('k', 'pa"ss\\word-123')
+            self.assertNotIn('word-123', app.guard.scrub('{"p": "pa\\"ss\\\\word-123"}'))
+        finally:
+            asyncio.run(app.close())

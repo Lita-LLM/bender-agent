@@ -48,6 +48,7 @@ def register(reg) -> None:
         if action not in ("add", "replace", "remove"):
             return ToolResult("Ошибка: action — view, add, replace или remove.", ok=False, summary="плохое действие")
         await ctx.check("memory.core", name, f"{ {'add': 'добавить в', 'replace': 'поправить', 'remove': 'удалить из'}[action] } {name}: {(text or old)[:120]}")
+        cur = agent_ctx.selfdir.read(name)  # перечитать после одобрения: за время ожидания файл мог измениться
         if action == "add":
             if not text.strip():
                 return ToolResult("Ошибка: пустая запись.", ok=False, summary="пусто")

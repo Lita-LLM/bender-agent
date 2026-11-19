@@ -213,7 +213,15 @@ class Chrome:
             else:
                 future.set_result(message.get('result') or {})
         elif 'method' in message:
+            if message['method'] == 'Page.javascriptDialogOpening':
+                # alert/confirm/prompt вешали все тулы браузера: закрываем сразу (beforeunload — разрешаем уйти)
+                accept = (message.get('params') or {}).get('type') == 'beforeunload'
+                self.loop.create_task(self._close_dialog(accept, message.get('sessionId')))
             self.events.put_nowait(message)
+
+    async def _close_dialog(self, accept, session):
+        try:await self.call('Page.handleJavaScriptDialog', {'accept': accept}, session=session, timeout=5)
+        except Exception:pass  # noqa: BLE001 — диалог уже закрыт или страница ушла
 
     async def call(self, method, params=None, session=None, timeout=20.0):
         self.ids += 1

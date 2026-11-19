@@ -296,6 +296,10 @@ async def _compact(agent_ctx, sid: str, budget: int, *, force: bool = False, dur
     new = {"upto": part[-1]["id"], "summary": summary, "ts": time.time(), "count": int(st.get("count", 0) if upto else 0) + len(part),
            "parts": int(st.get("parts", 0)) + 1, 'since_ts': since, 'until_ts': until, 'guide': guide,
            'continuation': continuation(agent_ctx, sid, part, st), 'tainted': bool(st.get('tainted') or any(r.get('meta', {}).get('untrusted') or r.get('meta', {}).get('tainted') for r in part))}
+    if st.get("page"):
+        new.update(page=st["page"], reason=st.get("reason", ""))  # метка «новой страницы» переживает сжатие (A31)
+    if {k: state(agent_ctx, sid).get(k) for k in ("upto", "ts", "page")} != {k: st.get(k) for k in ("upto", "ts", "page")}:
+        return None  # пока шёл пересказ, хозяин начал новую страницу или сбросил пересказ: его выбор не затираем (A30)
     agent_ctx.store.update_session(sid, meta={"compact": new})
     diary = str(data.get("diary") or "").strip()
     if diary:

@@ -280,6 +280,8 @@ class Hooks:
     def start(self) -> int:
         """После перезапуска: running → interrupted (без повтора), принятые — снова в работу."""
         now = time.time()
+        # завершённые события старше 30 дней — прочь: таблица росла без предела (A43)
+        self.app.store.x("DELETE FROM hook_events WHERE state IN ('done','failed','interrupted','cancelled') AND received < ?", (now - 30 * 86400,))
         stuck = self.app.store.q("SELECT * FROM hook_events WHERE state = 'running'")
         for row in stuck:
             self._set(row["id"], "interrupted", error="Ход прерван перезапуском; действие могло успеть выполниться. Повторить — вручную.", finished=now)
@@ -323,6 +325,10 @@ class Hooks:
             if not row:
                 return
             eid = row["id"]
+            hook = self.get(row["hook"])
+            if not hook or not hook.get("enabled", True):  # вебхук удалён или выключен после приёма — событие не запускает ход (A42)
+                self._set(eid, "failed", error="Вебхук удалён или выключен", finished=time.time())
+                continue
             try:
                 ctx = self.app.agents.get(agent)
             except HumanError as e:  # агента архивировали после приёма — не обходим, отказ виден

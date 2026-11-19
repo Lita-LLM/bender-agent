@@ -186,6 +186,9 @@ class Store:
                 for st in statements:
                     altered = re.match(r"(?is)^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s", st)
                     before = {row["name"] for row in db.execute("PRAGMA table_info(" + altered.group(1) + ")")} if altered else set()
+                    column = re.match(r"(?is)^\s*ALTER\s+TABLE\s+\w+\s+ADD\s+(?:COLUMN\s+)?(\w+)", st) if altered else None
+                    if column and column.group(1) in before:
+                        continue  # второй процесс уже добавил колонку: гонка миграций не роняет запуск
                     db.execute(st)
                     if altered:
                         for column in db.execute("PRAGMA table_info(" + altered.group(1) + ")"):

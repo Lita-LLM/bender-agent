@@ -210,7 +210,7 @@ class Manager:
                 alias = tool_name(sid, name)
 
                 def make_handler(server_id, raw_name):
-                    async def handler(ctx, **args):
+                    async def handler(ctx, /, **args):  # у тула может быть свой параметр ctx (охота)
                         return await self.call(server_id, raw_name, args, ctx)
                     return handler
 
@@ -375,8 +375,8 @@ class Manager:
                 errors.append(f"{name}: {exc}")
         return {"imported": imported, "errors": errors, "warnings": warnings, **self.public()}
 
-    async def disconnect(self, sid):
-        if self._subscriptions:await self._subscriptions.stop(sid)
+    async def disconnect(self, sid, *, keep_subscription=False):
+        if self._subscriptions and not keep_subscription:await self._subscriptions.stop(sid)
         entry = self.clients.pop(sid, None)
         if entry:
             pool = self._host_state()["pool"]
@@ -692,7 +692,10 @@ class Manager:
             except BaseException as exc:
                 if not isinstance(exc, HumanError) or exc.code not in ("mcp_unapproved", "mcp_agent", "mcp_disabled", "denied"):
                     self.note_error(sid, exc)
-                await self.disconnect(sid)
+                # Отмена или ошибка одного вызова не убивает живой (в том числе общий для стаи) процесс посреди чужих вызовов
+                # и не снимает подписку хозяина (охота A49/A50). Рвём только мёртвое соединение или сбой транспорта.
+                if not self.connected(sid) or not isinstance(exc, (asyncio.CancelledError, HumanError)):
+                    await self.disconnect(sid, keep_subscription=True)
                 raise
 
     async def close(self):

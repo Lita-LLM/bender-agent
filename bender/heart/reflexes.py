@@ -85,7 +85,14 @@ async def check(agent_ctx, job) -> tuple[bool | None, str, dict]:
         from ..tools.registry import ToolContext
 
         ctx = ToolContext(app=agent_ctx, session_id=f"job:{job.id}", actor="agent", tainted=False, unattended=True, turn={}, progress=lambda s: None)
-        r = await agent_ctx.tools.run("run", {"command": c.get("cmd") or "", "timeout": int(c.get("timeout", 30))}, ctx)
+        grants = [(a.get("capability"), a.get("target") or "*") for a in (job.authority or []) if isinstance(a, dict) and a.get("capability")]
+        if grants:
+            agent_ctx.guard.grant(f"job:{job.id}", grants)  # полномочия, которые хозяин дал задаче (B2)
+        try:
+            r = await agent_ctx.tools.run("run", {"command": c.get("cmd") or "", "timeout": int(c.get("timeout", 30))}, ctx)
+        finally:
+            if grants:
+                agent_ctx.guard.revoke(f"job:{job.id}", grants)
         if not r.ok and "Отказано" in (r.content or ""):
             raise HumanError("reflex_denied", "Предохранитель не дал выполнить команду рефлекса", r.content[:300])
         code = (r.data or {}).get("code")

@@ -157,7 +157,7 @@ def snapshot(agent_ctx, turn=None, candidate=None, *, detailed=False):
 
 def brief(agent_ctx, turn, candidate):
     data = snapshot(agent_ctx, turn, candidate)
-    scope = {'subagent': turn.system is not None, 'role': turn.model_role, 'tools': turn.tool_names,
+    scope = {'speakers': bool(getattr(agent_ctx, 'host', agent_ctx).settings.get('speakers', 'enabled', False)), 'subagent': turn.system is not None, 'role': turn.model_role, 'tools': turn.tool_names,
              'limits': {k: turn.limits.get(k) for k in ('steps', 'seconds', 'usd')}}
     # Часы — изменчивая часть паспорта у последней реплики, не начало кэшируемого промпта.
     key = hashlib.sha256(json.dumps([{k:v for k,v in data.items() if k not in ('clock', 'fuel')}, scope], ensure_ascii=False, sort_keys=True).encode()).hexdigest()

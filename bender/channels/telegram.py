@@ -68,7 +68,7 @@ def md_to_html(text: str) -> str:
         s = htmlmod.escape('\n'.join(lines), quote=False)
         s = re.sub(r"`([^`\n]+)`", lambda m: f"<code>{m.group(1)}</code>", s)
         s = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", s)
-        s = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", lambda m: f'<a href="{htmlmod.escape(m.group(2))}">{m.group(1)}</a>', s)
+        s = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", lambda m: f'<a href="{m.group(2).replace(chr(34), "&quot;")}">{m.group(1)}</a>', s)  # текст уже экранирован: & не удваивается
         out.append(s)
     return "".join(out)
 
@@ -941,7 +941,7 @@ class Telegram:
         bind(self,chat_id,app,sid)
         attachments=attachments or []
         # агент ждёт ответа на вопрос без вариантов — это ответ, а не новое сообщение
-        for qid, q in (list(app.questions.items()) if not tainted and not attachments else []):
+        for qid, q in (list(app.questions.items()) if not tainted and not attachments and not reaction_wake else []):
             if q["card"].get("session") in (sid, None) and q["card"].get("agent_id",app.agent_id)==app.agent_id and not q["card"].get("options"):
                 app.answer(qid, text)
                 return

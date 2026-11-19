@@ -436,7 +436,8 @@ class GitUpdate:
             self.app.store.meta_set('updates:checked', time.time())
             self.app.store.meta_set('updates:available', plan if plan['available'] else None)
             if plan['available'] and sleep_event and mode == 'night':
-                if self.app.mind.turns or self.app.team.running:
+                from .request import busy
+                if self.app.mind.turns or self.app.team.running or busy(self.app.host):  # и ходы других агентов стаи (B9)
                     return  # не перезапускаем чужой активный ход
                 result = await self.install(plan, nightly=True)
                 self.app.store.meta_set('updates:available', None)

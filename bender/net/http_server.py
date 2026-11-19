@@ -142,11 +142,11 @@ class StreamResponse(Response):
         self.headers.set("Transfer-Encoding", "chunked")
         if "cache-control" not in self.headers:
             self.headers.set("Cache-Control", "no-cache")
-        writer.write(_head(self.status, self.headers))
-        await writer.drain()
-        if head_only:
-            return True
         try:
+            writer.write(_head(self.status, self.headers))
+            await writer.drain()
+            if head_only:
+                return True  # finally закроет генератор: подписка на шину не висит вечно
             async for chunk in self.chunks:
                 if not chunk:
                     continue

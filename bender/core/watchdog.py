@@ -249,6 +249,13 @@ class Watchdog:
 
     def _health_deadline(self, signum=None, frame=None):
         """Один таймер на испытуемый старт; в обычном простое его нет."""
+        if not self._confirm_health():
+            self.trial_failed = True
+            if self.child:
+                self.child.signal(getattr(_sig, "SIGKILL", _sig.SIGTERM))
+
+    def _confirm_health(self):
+        """Ядро отметилось здоровым — снять испытание. True, если отметка есть."""
         path = os.path.join(self.data_dir, "local", "health-" + self.trial_nonce + ".txt")
         try:
             with open(path, encoding="utf-8") as f:
@@ -269,10 +276,7 @@ class Watchdog:
             # Следующее обновление может поставить новый pending до выхода этого ядра.
             # Здоровый прежний процесс больше не находится на испытании.
             self.trial_nonce = None
-        else:
-            self.trial_failed = True
-            if self.child:
-                self.child.signal(getattr(_sig, "SIGKILL", _sig.SIGTERM))
+        return healthy
 
     def _wait_trial(self, seconds):
         if hasattr(_sig, "SIGALRM"):
@@ -341,6 +345,8 @@ class Watchdog:
             self.child = None
             if self.stopping:
                 return 0
+            if self.trial_nonce and not self.trial_failed:
+                self._confirm_health()  # ядро вышло раньше срока, но успело отметиться здоровым: не откатывать (охота A55)
             if self.trial_nonce and (self.trial_failed or (self._sync().get("slots") or {}).get("pending")):
                 reason = "не получен ответ о здоровье" if self.trial_failed else f"испытательный запуск завершился, код {code}"
                 if self._rollback(reason):

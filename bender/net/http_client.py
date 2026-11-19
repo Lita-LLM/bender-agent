@@ -19,6 +19,7 @@ import base64
 import ipaddress
 import json as jsonlib
 import os
+import re
 import socket
 import ssl
 import time
@@ -94,8 +95,12 @@ def proxy_for(scheme: str, host: str) -> str | None:
     if no_proxy and _no_proxy_match(host, no_proxy):
         return None
     if scheme == "https":
-        return os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
-    return os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+        value = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+    else:
+        value = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+    if value and "://" not in value:
+        value = "http://" + value  # «proxy:3128» без схемы раньше разбирался как localhost:80
+    return value or None
 
 
 _ssl_default: ssl.SSLContext | None = None
@@ -435,6 +440,9 @@ class HttpClient:
         host = split.hostname or ""
         if not host:
             raise NetError("protocol", "В адресе нет хоста", url=url)
+        if not host.isascii():
+            try:host = host.encode("idna").decode("ascii")  # IDN: Host и CONNECT — в punycode
+            except UnicodeError:raise NetError("protocol", "Неверное имя хоста", url=url) from None
         port = split.port or (443 if scheme == "https" else 80)
         if proxy is True:
             proxy = proxy_for(scheme, host) if self.use_env_proxy else None
@@ -497,7 +505,7 @@ class HttpClient:
                     read_timeout = max(0.1, min(read_timeout, deadline - time.monotonic()))
                 status_line = await asyncio.wait_for(conn.reader.readuntil(b"\n"), read_timeout)
                 continues = 0
-                while status_line.startswith(b"HTTP/1.1 100") or status_line.startswith(b"HTTP/1.0 100"):
+                while re.match(rb"HTTP/1\.[01] 1(?!01)\d\d", status_line):  # любой промежуточный 1xx (102, 103), кроме 101
                     continues += 1
                     if continues > 8:
                         raise NetError("protocol", "Сервер бесконечно шлёт «100 Continue»", url=url)

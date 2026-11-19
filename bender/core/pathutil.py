@@ -88,8 +88,7 @@ def case_sensitive(path):
             return sensitive
         except OSError:
             if probe == volume:
-                _CASE[key] = False
-                return False
+                return False  # проба не удалась нигде — не запоминаем: следующий вызов попробует снова (A19)
             probe = probe.parent
 
 

@@ -118,7 +118,7 @@ def register(reg) -> None:
         await ctx.check("fs.write", str(p), f"поправить {_rel(ctx, p)}")
         if not p.is_file():
             return ToolResult(f"Нет такого файла: {path}", ok=False, summary="нет файла")
-        text = p.read_text(encoding="utf-8")
+        text = p.read_bytes().decode("utf-8")  # без перевода CRLF→LF во всём файле
         n = text.count(old) if old else 0
         if n == 0:
             return ToolResult("Ошибка: такого текста в файле нет. Прочитай файл и скопируй кусок точно, с отступами.", ok=False, summary="кусок не найден")
