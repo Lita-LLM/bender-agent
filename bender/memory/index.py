@@ -462,7 +462,7 @@ class MemoryIndex:
     def useful(self, *, min_hits: int = 2, min_queries: int = 2, limit: int = 30) -> list[dict]:
         """Кандидаты в ядро: находились не раз, по разным запросам, не недоверенное, ещё не продвинуты."""
         out = []
-        for r in self.store.q("SELECT * FROM mem_usage WHERE promoted IS NULL AND hits >= ? AND provenance NOT IN ('untrusted') ORDER BY hits DESC, last DESC LIMIT ?",
+        for r in self.store.q("SELECT * FROM mem_usage WHERE promoted IS NULL AND hits >= ? AND provenance IN ('owner', 'bender') ORDER BY hits DESC, last DESC LIMIT ?",
                               (min_hits, limit * 3)):
             qs = json.loads(r["queries"])
             if len(qs) >= min_queries:

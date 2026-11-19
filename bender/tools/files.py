@@ -201,8 +201,8 @@ def register(reg) -> None:
                 skipped += 1  # закрытый файл пропускаем, остальной поиск идёт
                 continue
             try:
-                if f.stat().st_size > 5 * 1024 * 1024:
-                    continue
+                if not f.is_file() or f.stat().st_size > 5 * 1024 * 1024:
+                    continue  # FIFO и устройства не читаем: чтение повисло бы навсегда
                 data = f.read_bytes()
             except OSError:
                 continue
