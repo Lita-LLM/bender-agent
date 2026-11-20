@@ -207,15 +207,16 @@ class MindTest(TempDirCase):
     @async_test
     async def test_loop_detection_and_limit(self):
         async with MindEnv(self.tmp) as env:
-            env.app.settings.set("agent", {"max_steps": 5})
-            env.script([call("list_dir")] * 6 + [{"text": "всё"}])
+            env.app.settings.set("agent", {"max_steps": 10})
+            env.script([call("list_dir")] * 8 + [{"text": "всё"}])
             res = await env.app.mind.say(env.sid, "смотри")
             tools = [m for m in env.app.store.messages(env.sid) if m["role"] == "tool"]
-            self.assertEqual(len(tools), 3)
+            self.assertEqual(len(tools), 6)  # третий повтор — подсказка модели, остановка — если повторы продолжились
+            self.assertIn("в третий раз подряд", tools[2]["content"])
             self.assertEqual(res["error"]["code"], "loop")
             events = [m for m in env.app.store.messages(env.sid) if m["role"] == "event"]
             self.assertTrue(any("Петля:" in e["content"] for e in events))
-            self.assertEqual(res["steps"], 3)
+            self.assertEqual(res["steps"], 6)
 
     @async_test
     async def test_halt_during_approval(self):

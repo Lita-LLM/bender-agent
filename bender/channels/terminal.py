@@ -248,7 +248,7 @@ class TerminalChat:
             c = ev["card"]
             self.pending.append({"kind": "approval", "card": c})
             t.line()
-            t.line(t.amber("  ⚠ Предохранитель спрашивает: ", bold=True) + __import__("bender.guard.cardtext", fromlist=["action_text"]).action_text(c, 100000)[0])
+            t.line(t.amber("  ⚠ Предохранитель спрашивает: ", bold=True) + (c.get("full") or __import__("bender.guard.cardtext", fromlist=["action_text"]).action_text(c, 100000)[0]))
             t.line(t.dim(f"    {c.get('reason')}"))
             if c.get("tainted"):
                 t.line(t.red("    В этом ходе агент читал недоверенное."))

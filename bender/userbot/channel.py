@@ -658,6 +658,12 @@ class Userbot:
                     c = item[1]
                     from ..guard.cardtext import action_text
                     what, cut = action_text(c)
+                    full = str(c.get('full') or '')
+                    if cut and full and len(full) <= 4000 * 12:
+                        # длинное действие целиком — частями перед карточкой, чтобы одобрять прочитанное (охота 20.11)
+                        for i in range(0, len(full), 4000):
+                            await self.send_owner(('Действие целиком:\n' if not i else '') + full[i:i + 4000])
+                        what, cut = 'длинное — целиком в сообщениях выше', False
                     text = ('⚠ Предохранитель спрашивает: ' + what + '\n' + str(c.get('reason') or '') + ('\nВ этом ходе агент читал недоверенное.' if c.get('tainted') else '')
                             + ('\n\nДействие показано не целиком — одобрить можно только в пульте; здесь ответь «нет», чтобы отказать.' if cut else
                                '\n\nОтветь на это сообщение: да · да в разговоре · ' + ('да всегда · ' if c.get('can_remember') else '') + 'нет'))

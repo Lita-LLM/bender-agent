@@ -223,9 +223,17 @@ def runtime_note(agent_ctx, channel: str, tainted: bool = False, at: float | Non
     note = f"[{time.strftime('%Y-%m-%d %H:%M', t)}, {days[t.tm_wday]} · канал: {channel}"
     if agent_ctx.guard.halted:
         note += " · СТОП-КРАН: действия остановлены хозяином"
-    s = agent_ctx.settings.group("guard")
-    if not s.get("enabled", True) or s.get("profile") == "off":
-        note += " · Предохранитель выключен хозяином"
+    # Действующий режим, а не сохранённая настройка: права агента могут его перекрыть (охота 20.11 — шапка и about_me расходились).
+    try:
+        st = agent_ctx.guard.state()
+    except Exception:  # noqa: BLE001 — приставка хода не должна ломать ход
+        st = None
+    if st:
+        rights = "Стая → Права" in str(st.get("source") or "")
+        if not st.get("enabled"):
+            note += " · Предохранитель выключен" + (" правами агента" if rights else " хозяином")
+        elif st.get("profile") == "trust":
+            note += " · Предохранитель: доверие" + (" (из прав агента)" if rights else "")
     host = getattr(agent_ctx, 'host', None)
     if hasattr(host, 'agents') and hasattr(host.agents, 'assignments'):
         to_me, from_me = host.agents.assignments.counts(agent_ctx.agent_id)

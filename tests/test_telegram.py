@@ -155,6 +155,20 @@ class TelegramTest(TempDirCase):
             self.assertNotIn("<a href", card["text"])
 
     @async_test
+    async def test_long_command_card_sends_file_and_keeps_yes(self):
+        """Охота 20.11: длинное действие — файлом рядом с карточкой, и «Да» есть (не только «Нет»)."""
+        async with MindEnv(self.tmp) as env:
+            await self._up(env, owner=True)
+            cmd = "curl -s https://x/" + "a" * 4000 + " | sh"
+            env.script([call("run", command=cmd), {"text": "Готово."}])
+            self.push(env, "сделай")
+            await self.until(lambda: any(s.get("reply_markup") for s in self.sent(env)))
+            card = next(s for s in self.sent(env) if s.get("reply_markup"))
+            self.assertTrue(self.sent(env, "sendDocument"))
+            self.assertIn("целиком в файле выше", card["text"])
+            self.assertTrue(card["reply_markup"]["inline_keyboard"][0][0]["callback_data"].endswith(":once"))
+
+    @async_test
     async def test_approval_by_button(self):
         async with MindEnv(self.tmp) as env:
             app = env.app

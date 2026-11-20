@@ -1220,12 +1220,13 @@ class Telegram:
             what, cut = action_text(c)
             row = [{"text": "Да, один раз", "callback_data": f"ap:{c['id']}:once"}] + ([{"text": "В этом разговоре", "callback_data": f"ap:{c['id']}:task"}] if c.get("can_session", True) else [])
             row2 = ([{"text": ("Всегда: " + str(c.get("remember") or "такое"))[:60], "callback_data": f"ap:{c['id']}:always"}] if c.get("can_remember") else []) + [{"text": "Нет", "callback_data": f"ap:{c['id']}:deny"}]
-            if cut:row, row2 = [], [{"text": "Нет", "callback_data": f"ap:{c['id']}:deny"}]  # обрезанное не одобряется вслепую (охота 19.11)
+            full = str(c.get("full") or "")
+            if cut and not full:row, row2 = [], [{"text": "Нет", "callback_data": f"ap:{c['id']}:deny"}]  # полного текста нет — вслепую не одобряется
             # Что именно одобряется — блоком кода: разметка из команды ([docs](…), **…**) не прячет её часть (охота 16.11).
             what = what.replace("```", "ʼʼʼ")
             text = f"⚠ Предохранитель спрашивает:\n```\n{what}\n```\n{c.get('reason') or ''}" + ("\nВ этом ходе агент читал недоверенное." if c.get("tainted") else "") \
-                + ("\nДействие длинное и показано не целиком — одобрить можно только в пульте." if cut else "")
-            self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [r for r in (row, row2) if r]))
+                + (("\nДействие длинное — целиком в файле выше." if full else "\nДействие показано не целиком — одобрить можно только в пульте.") if cut else "")
+            self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [r for r in (row, row2) if r], full=full if cut else ""))
         elif t == "question" and s.get("approvals", True):
             c = ev.get("card") or {}
             opts = c.get("options") or []
@@ -1234,7 +1235,9 @@ class Telegram:
         elif t in ("approval_done", "question_done"):
             ref = self._cards.pop(str(ev.get("id")), None)
             if ref:
-                self._bg_task(self.api("editMessageReplyMarkup", {"chat_id": ref[0], "message_id": ref[1], "reply_markup": {"inline_keyboard": []}}))
+                closed = {"timeout": "⌛ Одобрение истекло — не выполнялось", "cancelled": "Ход остановлен — не выполнялось"}.get(str(ev.get("choice") or ""))
+                keyboard = [[{"text": closed, "callback_data": "x"}]] if closed else []  # видно, что это не отказ хозяина (охота 20.11)
+                self._bg_task(self.api("editMessageReplyMarkup", {"chat_id": ref[0], "message_id": ref[1], "reply_markup": {"inline_keyboard": keyboard}}))
 
     def _userbot_serves(self, ev):
         """Хозяин направил одобрения, вопросы и уведомления этого агента в чат его аккаунта Telegram — общий бот их не дублирует."""
@@ -1281,7 +1284,15 @@ class Telegram:
         if not message:return None
         return next((cid for cid,(c,m) in list(self._cards.items()) if m==message and int(c)==int(chat) and cid in self.app.questions),None)
 
-    async def _card(self, cid: str, chat: int, text: str, buttons, route=None) -> None:
+    async def _card(self, cid: str, chat: int, text: str, buttons, route=None, full: str = "") -> None:
+        if full:
+            # Длинное действие целиком — файлом перед карточкой: хозяин одобряет с телефона то, что прочитал (охота 20.11).
+            try:
+                await self.api("sendDocument", {"chat_id": chat, "document": "attach://action", "caption": "Действие целиком"},
+                               files={"action": {"name": "action.txt", "mime": "text/plain", "bytes": full.encode("utf-8")}})
+            except TelegramError:
+                buttons = [[{"text": "Нет", "callback_data": f"ap:{cid}:deny"}]]
+                text = text.replace("целиком в файле выше", "файл не отправился, одобрить можно только в пульте")
         mid = await self.send(chat, text, buttons=buttons)
         if mid:
             self._cards[cid] = (chat, mid)

@@ -321,6 +321,11 @@ class Team:
             if res.get("error"):
                 status = 'cancelled' if res['error'].get('code')=='stopped' or (self.get(t['id']) or {}).get('status')=='cancelled' else 'error'
                 error = f"{res['error'].get('title')}. {res['error'].get('hint') or ''}\n{res['error'].get('detail') or ''}".strip()
+            elif res.get("limit"):
+                # Ход упёрся в лимит — это не «готово»: родитель видит, что работа неполная и её можно продолжить (охота 20.11).
+                status, error = "error", f"Остановлено по: {res['limit']} — работа не закончена, ниже то, что успели."
+            elif not result and schema is None:
+                status, error = "error", "Модель не дала ответа."
             elif schema is not None:
                 data = side.parse_json(result) if schema.get("type", "object") == "object" else _loads(result)
                 errs = validate(data, schema) if data is not None else ["ответ — не JSON"]
@@ -344,7 +349,7 @@ class Team:
         worker.mirror()
         outputs=[]
         try:
-            if status=='done':outputs=await worker.artifacts(bool(res.get('tainted')))
+            if status=='done' or res.get('limit'):outputs=await worker.artifacts(bool(res.get('tainted')))
         except Exception as exc:
             status,error='error',(exc.title+'; '+exc.hint) if isinstance(exc,HumanError) else 'Не удалось сохранить файлы задачи; проверь место на диске и права.'
         finally:
@@ -386,7 +391,7 @@ class Team:
         text += '\nШаги задачи (не повторяй уже сделанные действия):\n' + json.dumps(self.timeline(t), ensure_ascii=False)
         try:
             await agent_ctx.mind.say(sid, text, channel="team", actor="team", tainted=bool(t["result_tainted"]), unattended=bool(t["unattended"]), wait=False,
-                               label=f"📋 Задача #{t['id'][-6:]} {'готова' if t['status'] == 'done' else 'завершена с ошибкой'}")
+                               label=f"📋 Задача #{t['id'][-6:]} {'готова' if t['status'] == 'done' else 'остановлена по лимиту' if str(t.get('error') or '').startswith('Остановлено по') else 'завершена с ошибкой'}")
         except Exception:  # noqa: BLE001
             pass
 
@@ -463,7 +468,14 @@ def _loads(text: str):
 def render(t: dict, limit: int = 3000) -> str:
     """Итог задачи для родителя: данные по схеме или текст; недоверенное — с пометкой."""
     if t["status"] != "done":
-        return f"Ошибка: {t.get('error') or t['status']}" + (f"\nЧто успел: {t['result'][:1000]}" if t.get("result") else "")
+        head = f"Ошибка: {t.get('error') or t['status']}"
+        if t.get("result"):
+            done = t["result"][:1000]
+            if t.get("result_tainted"):
+                from ..tools.web import untrusted
+                done = untrusted(f"ответ субагента #{t['id'][-6:]} (читал недоверенное)", done)
+            head += "\nЧто успел: " + done
+        return head + _outputs_note(t)
     body = json.dumps(t["data"], ensure_ascii=False, indent=1) if t.get("data") is not None else (t.get("result") or "(пусто)")
     if t.get("schema_valid") == 0:
         body = "(ответ не совпал со схемой — сырой текст)\n" + body
@@ -471,5 +483,19 @@ def render(t: dict, limit: int = 3000) -> str:
     if t.get("result_tainted"):
         from ..tools.web import untrusted
 
-        return untrusted(f"ответ субагента #{t['id'][-6:]} (читал недоверенное)", body)
-    return body
+        return untrusted(f"ответ субагента #{t['id'][-6:]} (читал недоверенное)", body) + _outputs_note(t)
+    return body + _outputs_note(t)
+
+
+def _outputs_note(t: dict) -> str:
+    """Какие файлы задача вернула и какие отложила, чтобы не затереть файлы родителя."""
+    outputs = t.get("outputs") or []
+    if not outputs:
+        return ""
+    lines = []
+    for item in outputs[:30]:
+        if item.get("aside"):
+            lines.append(f"- {item['aside']} (у тебя уже есть другой {item['path']} — не тронут; сравни и примени сам)")
+        else:
+            lines.append(f"- {item['path']}")
+    return "\nФайлы задачи в рабочей папке:\n" + "\n".join(lines) + ("\n…" if len(outputs) > 30 else "")

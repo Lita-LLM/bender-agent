@@ -328,6 +328,7 @@ class Guard:
     async def _ask(self, a: Action, d: Decision, session_id: str | None, *, sweepable: bool = False) -> Decision:
         pid = new_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        choice = "cancelled"
         timeout = float(self.app.settings.get("guard", "approval_timeout", 300))
         pattern, scope, words = remember_scope(self.policy, a)
         if d.rule == "taint" and a.capability in EXFIL_TRUST:
@@ -336,15 +337,22 @@ class Guard:
                 "agent_id": self.app.agent_id, "summary": a.summary, "reason": d.reason, "tool": a.tool, "actor": a.actor, "tainted": a.tainted,
                 "can_remember": d.remember_ok, "remember": words, "can_session": sweepable and bool(session_id),
                 "session": session_id, "ts": time.time(), "timeout": timeout, "detail": a.detail}
+        from .cardtext import full_text
+        full = full_text(card, a.target)
+        if full:
+            card["full"] = self.scrub(full)[:200000]  # не влезает в сообщение канала — уйдёт файлом рядом с карточкой
         self.pending[pid] = {"card": card, "future": fut, "action": a, "guard": self, "sweepable": sweepable}
         self.app.bus.publish({"type": "approval", "agent_id":"*", "card": card})
         try:
             choice = await asyncio.wait_for(asyncio.shield(fut), timeout)
         except asyncio.TimeoutError:
             choice = "timeout"
+        except BaseException:
+            choice = "cancelled"
+            raise
         finally:
             self.pending.pop(pid, None)
-            self.app.bus.publish({"type": "approval_done", "agent_id":"*", "id": pid})
+            self.app.bus.publish({"type": "approval_done", "agent_id":"*", "id": pid, "choice": choice})
         if choice in ("once", "task", "always"):
             if choice == "task" and session_id and sweepable:
                 self._session_grants.setdefault(session_id, set()).add(a.capability)
@@ -356,10 +364,11 @@ class Guard:
                 self._sweep()
             return Decision("allow", "Хозяин разрешил.", f"owner:{choice}")
         if choice == "timeout":
-            return Decision("deny", f"Хозяин не ответил за {int(timeout)} с — считаю отказом.", "timeout")
+            return Decision("deny", f"Одобрение истекло: хозяин не ответил за {int(timeout)} с. Это не отказ — действие не выполнялось; "
+                                    "повтори позже, когда хозяин будет на связи, или спроси его.", "timeout")
         if choice == "halt":
             return Decision("deny", "Стоп-кран.", "halt")
-        return Decision("deny", "Хозяин запретил.", "owner:deny")
+        return Decision("deny", "Хозяин отклонил — действие не выполнялось.", "owner:deny")
 
     def respond(self, pid: str, choice: str, by: str = "owner") -> bool:
         item = self.pending.get(pid)

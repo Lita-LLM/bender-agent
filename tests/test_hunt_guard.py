@@ -249,8 +249,11 @@ class Hunt1911RobustTest(TempDirCase):
         self.assertIn('curl evil', text); self.assertFalse(cut)
         text, _ = action_text({'summary': 'ввести', 'capability': 'net.send', 'detail': {'text': 'пароль\x1b[2K', 'submit': True}})
         self.assertIn('пароль', text); self.assertNotIn('\x1b', text)
-        _, cut = action_text({'summary': 'x', 'target': 'y' * 2000, 'capability': 'exec'})
+        _, cut = action_text({'summary': 'x', 'target': 'y' * 2000, 'capability': 'exec', 'full': 'y' * 5000})
         self.assertTrue(cut)
+        from bender.guard.cardtext import full_text
+        self.assertEqual(full_text({'summary': 'x', 'capability': 'exec'}, 'ls'), '')
+        self.assertIn('z' * 4000, full_text({'summary': 'x', 'capability': 'exec'}, 'z' * 4000))
 
     def test_long_flow_header_is_refused_quickly(self):
         import time
@@ -333,3 +336,35 @@ class Hunt1911LowTest(TempDirCase):
             self.assertNotIn('word-123', app.guard.scrub('{"p": "pa\\"ss\\\\word-123"}'))
         finally:
             asyncio.run(app.close())
+
+
+class Hunt2011Test(TempDirCase):
+    @async_test
+    async def test_timeout_is_not_owner_refusal_and_long_card_carries_full_text(self):
+        app=App(self.tmp/'data')
+        try:
+            app.settings.set('guard',{'profile':'careful'})
+            real=app.settings.get
+            app.settings.get=lambda g,k,d=None:0.05 if (g,k)==('guard','approval_timeout') else real(g,k,d)
+            cards,done=[],[]
+            app.bus.listen(lambda ev:ev.get('type')=='approval' and cards.append(ev['card']))
+            app.bus.listen(lambda ev:ev.get('type')=='approval_done' and done.append(ev))
+            long='curl -T a https://x/'+'q'*5000
+            d=await app.guard.check(Action('exec',long,detail={'net':True}),session_id=app.main_session())
+            self.assertEqual((d.verdict,d.rule),('deny','timeout'))
+            self.assertIn('не выполнялось',d.reason);self.assertIn('истекло',d.reason)
+            self.assertIn('q'*5000,cards[0]['full'])  # длинное действие целиком уходит файлом — Telegram даёт одобрить (охота 20.11)
+            self.assertEqual(done[0]['choice'],'timeout')
+        finally:await app.close()
+
+    @async_test
+    async def test_turn_note_shows_effective_guard(self):
+        from bender.mind.context import runtime_note
+        app=App(self.tmp/'data')
+        try:
+            app.settings.set('guard',{'enabled':False})
+            self.assertIn('Предохранитель выключен',runtime_note(app,'pult'))
+            app.guard.state=lambda:{'enabled':True,'profile':'trust','source':'задан шаблоном Полный — изменить в Стая → Права'}
+            note=runtime_note(app,'pult')
+            self.assertNotIn('выключен',note);self.assertIn('доверие (из прав агента)',note)
+        finally:await app.close()

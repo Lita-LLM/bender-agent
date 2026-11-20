@@ -85,11 +85,17 @@ class TaskAgent:
             total+=path.stat().st_size
             if total>maximum or len(plans)>=count:raise HumanError('task_artifact','Результаты задачи превысили файловый предел','Увеличь предел артефактов команды в настройках.')
             plans.append((path,rel,target))
+        aside_root=self.parent.dirs.work/'задачи'/self.task['id'][-6:]
         for path,rel,target in plans:
+            data=path.read_bytes();item={'path':rel.as_posix(),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+            if target.exists() and (not target.is_file() or target.read_bytes()!=data):
+                # Свой файл родителя не затирается молча: другой вариант ложится рядом, в папку задачи (охота 20.11 — потерянный README).
+                target=aside_root/rel;item['aside']=target.relative_to(self.parent.dirs.work).as_posix()
             await ctx.check('fs.write',str(target),'вернуть файл задачи '+str(rel))
-            data=path.read_bytes();target.parent.mkdir(parents=True,exist_ok=True);atomic_write(target,data)
+            if not (target.is_file() and target.read_bytes()==data):
+                target.parent.mkdir(parents=True,exist_ok=True);atomic_write(target,data)
             archive=saved/rel;archive.parent.mkdir(parents=True,exist_ok=True);atomic_write(archive,data)
-            files.append({'path':rel.as_posix(),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+            files.append(item)
         return files
 
     async def close(self):

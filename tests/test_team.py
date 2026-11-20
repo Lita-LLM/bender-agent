@@ -78,6 +78,29 @@ class TeamTest(TempDirCase):
             self.assertGreaterEqual(done["steps"], 3)
 
     @async_test
+    async def test_returned_file_does_not_overwrite_parent_and_limit_is_not_done(self):
+        async with MindEnv(self.tmp) as env:
+            app = env.app
+            sid = await self._env(env)
+            pid = app.models.roles()["main"][0]["provider"]
+            app.models.set_role("coder", [{"provider": pid, "model": "script"}])
+            (app.dirs.work / "README.md").write_text("мой", encoding="utf-8")
+            env.script([call("write_file", path="README.md", content="чужой"), call("write_file", path="новый.txt", content="1"), {"text": "Готово"}])
+            t = app.team.spawn("coder", "Напиши README", parent_session=sid)
+            [done] = await app.team.wait([t["id"]], 10)
+            self.assertEqual((app.dirs.work / "README.md").read_text(encoding="utf-8"), "мой")  # охота 20.11: свой файл не затирается
+            aside = [o for o in done["outputs"] if o.get("aside")]
+            self.assertEqual(len(aside), 1)
+            self.assertEqual((app.dirs.work / aside[0]["aside"]).read_text(encoding="utf-8"), "чужой")
+            self.assertEqual((app.dirs.work / "новый.txt").read_text(encoding="utf-8"), "1")
+            self.assertIn("не тронут", render(done))
+            env.script([call("list_dir", path=str(i)) for i in range(10)])
+            t = app.team.spawn("coder", "Долго", parent_session=sid, budget={"steps": 2})
+            [done] = await app.team.wait([t["id"]], 10)
+            self.assertEqual(done["status"], "error")
+            self.assertIn("лимит шагов", done["error"])
+
+    @async_test
     async def test_schema_one_fix_attempt(self):
         async with MindEnv(self.tmp) as env:
             app = env.app

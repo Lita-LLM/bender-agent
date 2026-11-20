@@ -660,7 +660,7 @@ class Manager:
             signature = self.signature(server)
             if server.get("module"):
                 await self.app.modules.check_call(server, ctx)
-            await ctx.check("mcp.call", f"{sid}/{name}", f"MCP {sid}: {name}", detail={"arguments": self.app.guard.scrub(json.dumps(args, ensure_ascii=False))[:2000]})
+            await ctx.check("mcp.call", f"{sid}/{name}", f"MCP {sid}: {name}", detail={"arguments": (shown := self.app.guard.scrub(json.dumps(args, ensure_ascii=False)))[:100000], **({"arguments_cut": True} if len(shown) > 100000 else {})})
             client = await self.connect(server, ctx)
             try:
                 # Заново проверяем определения перед каждым выполнением; замеченные изменения не запускаем.

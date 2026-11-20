@@ -46,7 +46,7 @@ class Denied(HumanError):
 
 LAYERS = {"agent-rights": "потолок прав агента (Стая → Права)", "agent-private": "граница чужих агентов", "team-role": "права роли команды",
           "hardline": "жёсткий список", "protected": "защищённый путь", "sealed": "контур доверия", "unattended": "некого спросить",
-          "agent-control": "служебный порт пульта", "path_alias": "неоднозначный путь"}
+          "agent-control": "служебный порт пульта", "path_alias": "неоднозначный путь", "timeout": "одобрение истекло"}
 
 
 def denial_layer(app, decision: Decision) -> str:
@@ -233,10 +233,11 @@ class Registry:
             raise
         except Denied as e:
             before = [str(x)[:300] for x in e.data.get("failures") or []][:8]
-            res = ToolResult(f"Отказано Предохранителем: {e.decision.reason}\n{denial_layer(ctx.app, e.decision)}"
+            head = "Не выполнено" if e.decision.rule == "timeout" else "Отказано Предохранителем"
+            res = ToolResult(f"{head}: {e.decision.reason}\n{denial_layer(ctx.app, e.decision)}"
                              + ("\nДо отказа: " + "; ".join(before) if before else "")
                              + ("\nКак исправить: " + str(e.data["hint"])[:400] if e.data.get("hint") else ""), ok=False,
-                             summary=f"{t.title}: отказано ({e.decision.rule or '?'})",
+                             summary=f"{t.title}: " + ("одобрение истекло" if e.decision.rule == "timeout" else f"отказано ({e.decision.rule or '?'})"),
                              data={"denied": {"rule": e.decision.rule or "", "reason": (e.decision.reason or "")[:300],
                                               **({"provider": e.data["provider"]} if e.data.get("provider") else {}), **({"failures": before} if before else {}),
                                               **({"hint": str(e.data["hint"])[:400]} if e.data.get("hint") else {})}})

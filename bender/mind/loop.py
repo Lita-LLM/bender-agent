@@ -414,6 +414,7 @@ class Mind:
         if work:
             turn.seen_calls.clear()
             turn.state.pop('loop_detected', None)
+            turn.state.pop('loop_warned', None)
         return work
 
     def _save_event(self, sid: str, kind: str, text: str, data: dict | None = None) -> None:
@@ -624,7 +625,16 @@ class Mind:
                     n = period * 3
                     recent = turn.seen_calls[-n:]
                     if len(recent) == n and recent[:period] == recent[period:2*period] == recent[2*period:]:
-                        turn.state['loop_detected'] = True
+                        # Повтор бывает и законным (ждёт помощника, опрашивает статус) — сперва подсказка модели,
+                        # ход останавливается, только если повторы продолжаются после неё (охота 20.11: ложные «петли»).
+                        if turn.state.get('loop_warned'):
+                            turn.state['loop_detected'] = True
+                        else:
+                            turn.state['loop_warned'] = True
+                            turn.seen_calls.clear()
+                            out_text = str(out_text) + ("\n\n[Служебно: этот вызов в третий раз подряд дал тот же результат. Если ждёшь — подожди дольше "
+                                                       "(sleep в shell) или займись другим; если застрял — смени подход. Если повторы продолжатся, ход остановится.]")
+                        break
                 if tainted and not turn.tainted:
                     turn.tainted = True
                 tmsg = {"role": "tool", "tool_call_id": call.id, "name": call.name, "content": out_text}
@@ -650,17 +660,20 @@ class Mind:
                 self.publish(sid,{'type':'message','message':{**mmsg,'meta':mmeta}})
             self._flush_inbox(turn)
             if turn.state.get('loop_detected'):
-                self._save_event(sid, 'limit', 'Петля: одинаковые вызовы с одинаковыми аргументами и результатами повторились трижды. Останавливаюсь.')
+                self._save_event(sid, 'limit', 'Петля: одинаковые вызовы с одинаковыми результатами продолжились и после подсказки. Останавливаюсь — скажи, как быть.')
                 break
             # лимиты
             if max_steps and turn.steps >= max_steps:
                 self._save_event(sid, "limit", f"Достигнут лимит шагов ({max_steps}). Останавливаюсь — скажи, продолжать ли.")
+                turn.state['limit'] = f"лимит шагов ({max_steps})"
                 break
             if max_seconds and time.monotonic() - turn.started > max_seconds:
                 self._save_event(sid, "limit", f"Ход идёт дольше {int(max_seconds)} с. Останавливаюсь.")
+                turn.state['limit'] = f"лимит времени ({int(max_seconds)} с)"
                 break
             if max_cost and turn.cost > max_cost:
                 self._save_event(sid, "limit", f"Ход стоил больше ${max_cost:.2f}. Останавливаюсь — скажи, продолжать ли.")
+                turn.state['limit'] = f"лимит цены (${max_cost:.2f})"
                 break
             self._flush_inbox(turn)  # сообщения хозяина, пришедшие во время тулов, — в историю перед следующим шагом
-        return {"text": final_text, "error": {"code":"loop", "title":"Обнаружена петля одинаковых вызовов"} if turn.state.get("loop_detected") else None, "steps": turn.steps, "cost": round(turn.cost, 6), "tainted": turn.tainted}
+        return {"text": final_text, "error": {"code":"loop", "title":"Обнаружена петля одинаковых вызовов"} if turn.state.get("loop_detected") else None, "steps": turn.steps, "cost": round(turn.cost, 6), "tainted": turn.tainted, "limit": turn.state.get('limit')}

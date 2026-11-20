@@ -82,7 +82,7 @@ class LongTurnTest(TempDirCase):
             app=env.app;app.settings.set('memory',{'review':False})
             env.script([call('list_dir',path='a' if i%2==0 else 'b') for i in range(20)])
             result=await app.mind.say(env.sid,'сверь папки')
-            self.assertEqual(result['error']['code'],'loop');self.assertEqual(result['steps'],6)
+            self.assertEqual(result['error']['code'],'loop');self.assertEqual(result['steps'],12)
             env.script([call('plan',items=[]) for i in range(8)]+[{'text':'Готово'}])
             count=0;handler=app.tools.tools['plan'].handler
             async def changing(ctx,items):
