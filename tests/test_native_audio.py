@@ -7,6 +7,7 @@ from bender.mind.context import message_tokens
 from bender.net.http_server import HttpServer
 from tests.helpers import owner_web as create_web, owner_headers
 from bender.voice.input import prepare,attachment
+from bender.router.capabilities import description
 from tests.helpers import TempDirCase,async_test
 from tests.test_mind import MindEnv
 from tests import test_telegram as telegram
@@ -91,6 +92,30 @@ class NativeAudioTest(TempDirCase):
             self.assertTrue(user['meta']['untrusted']);self.assertTrue(any(part.get('type')=='audio' for part in user['content']))
             self.assertIn('Подпись к голосовому: /stop',user['content'][0]['text'])
             self.assertFalse(any(row['role']=='ears' for row in app.store.q('SELECT role FROM calls')))
+
+    @async_test
+    async def test_unrecognised_audio_refusal_moves_to_ears_and_stops_poisoning_history(self):
+        """Охота 20.11: отказ звука без ожидаемой фразы не должен ронять каждый ход из истории."""
+        from bender.net.http_server import JSONResponse
+        async with MindEnv(self.tmp) as env:
+            app=env.app;pid=app.models.roles()['main'][0]['provider'];seen=[]
+            ears=app.models.add_provider(name='Уши',base_url=env.base+'/v1',extra={'is_local':True})
+            app.models.set_role('ears',[{'provider':ears['id'],'model':'ears'}]);app.settings.set('voice',{'enabled':True,'stt_mode':'both'})
+            @env.fake.route('POST','/generic-audio/v1/chat/completions')
+            async def endpoint(req):
+                body=req.json();seen.append(body)
+                if any(p.get('type')=='input_audio' for m in body['messages'] if isinstance(m.get('content'),list) for p in m['content']):
+                    return JSONResponse({'error':{'message':'Request failed: part type 3 is unknown for this route'}},400)
+                return JSONResponse({'choices':[{'message':{'content':'Услышал расшифровку.'},'finish_reason':'stop'}]})
+            app.models.update_provider(pid,{'base_url':env.base+'/generic-audio/v1'})
+            source=[{'type':'text','text':'Послушай'},{'type':'audio','data':base64.b64encode(wav()).decode(),'format':'wav','seconds':1,'path':'record.wav'}]
+            first=await app.mind.say(env.sid,'Послушай',content=source)
+            self.assertIsNone(first['error'],first);self.assertEqual(len(seen),2)
+            second=await app.mind.say(env.sid,'А теперь?',content=None)
+            self.assertIsNone(second['error'],second)
+            raw=[any(p.get('type')=='input_audio' for m in body['messages'] if isinstance(m.get('content'),list) for p in m['content']) for body in seen]
+            self.assertEqual(raw,[True,False,False])
+            self.assertIs(description(app.models.providers()[pid],'script','audio_input')['value'],False)
 
     @async_test
     async def test_ogg_is_normalized_in_optional_process_and_original_is_kept(self):

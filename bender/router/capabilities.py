@@ -41,6 +41,12 @@ def rejected(error,messages):
     array_rejected=bool(re.search(r'(?:expected|must be).{0,20}(?:a )?string.{0,80}(?:array|list)',text))
     for kind,key,words in [('image','vision',r'(?:images?|vision|image url|input image)'),('audio','audio_input',r'(?:audio|input audio|sound)')]:
         if kind not in present:continue
+        # Звук: любой формат-отказ провайдера на запрос со звуком — отказ возможности. Иначе модель, которая звук не
+        # принимает, а текст ошибки не совпал с ожидаемой фразой, роняет каждый ход: звук остаётся в истории (охота 20.11).
+        # Ложный отказ стоит одного перехода на Уши и снимается настройкой возможности; ложная уверенность — нет.
+        if kind=='audio':
+            if error.klass=='format' and error.http_status in (400,415,422):out.add(key)
+            continue
         patterns=[r'(?:does not|doesn.t|cannot|can.t|not) support.{0,70}'+words,
                   words+r'.{0,70}(?:not supported|unsupported|not allowed|only supported by certain models)',
                   r'(?:unsupported|not allowed)(?!\s+(?:parameter|field)).{0,70}'+words,
