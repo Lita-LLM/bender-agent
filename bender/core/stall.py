@@ -49,11 +49,32 @@ def place(frame, limit=40) -> list[str]:
     return [f"{Path(f.filename).name}:{f.lineno} {f.name}" + (f" — {f.line.strip()}" if f.line else "") for f in traceback.extract_stack(frame, limit=limit)]
 
 
+# Общие подпорки: место в них ничего не говорит («стоял в store.py one», «в realpath») — к нему добавляется,
+# кто их вызвал, до первого кадра, который уже говорит (/load 25.11: так виновник и не был виден).
+PLUMBING = ('store.py', 'pathutil.py', 'settings.py', 'posixpath.py', 'genericpath.py', 'ntpath.py', 'pathlib.py', '_local.py',
+            'os.py', 'decoder.py', 'encoder.py', 'contextlib.py', 'functools.py')
+
+
+def _file(line: str) -> str:
+    name = line.split(':', 1)[0]
+    return name[len('<frozen '):-1] + '.py' if name.startswith('<frozen ') else name
+
+
 def ours(stack: list[str]) -> str:
-    """Самое глубокое место в коде Бендера: по нему видно, чья это блокировка."""
-    for line in reversed(stack):
-        if not line.split(':', 1)[0] in ('threading.py', 'selectors.py', 'base_events.py', 'events.py', 'runners.py', 'tasks.py', 'thread.py', 'queue.py'):
+    """Самое глубокое место в коде Бендера: по нему видно, чья это блокировка. Если это подпорка (база, пути,
+    настройки) — с цепочкой вызвавших: «store.py:145 one ← telegram.py:222 owner — …»."""
+    for i in range(len(stack) - 1, -1, -1):
+        line = stack[i]
+        if line.split(':', 1)[0] in ('threading.py', 'selectors.py', 'base_events.py', 'events.py', 'runners.py', 'tasks.py', 'thread.py', 'queue.py'):
+            continue
+        chain = [line]
+        j = i
+        while _file(stack[j]) in PLUMBING and j > 0 and len(chain) < 5:
+            j -= 1
+            chain.append(stack[j])
+        if len(chain) == 1:
             return line
+        return ' ← '.join(item.split(' — ', 1)[0] for item in chain[:-1]) + ' ← ' + chain[-1]
     return stack[-1] if stack else 'неизвестно'
 
 

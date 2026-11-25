@@ -43,7 +43,8 @@ class Live:
         self.quiet, self.closed, self.plain = False, False, False
         self.pending, self.inserted = {}, 0  # слова хозяина, пришедшие во время хода: ждут вставки/конца, уже вставлены
         self.message_id = None
-        self.keep_status = False  # ответ уйдёт первым, статус удалится после него (на одну задержку Telegram быстрее)
+        self.keep_status = False
+        self.route_seen = False  # адрес хода (telegram_route), с которым сюда шли события: совпал — кусок текста без базы  # ответ уйдёт первым, статус удалится после него (на одну задержку Telegram быстрее)
         self.drafted_at = 0.0  # когда черновик последний раз ушёл в Telegram (закрыть его в конце хода)
         self.head = telegram.badge(agent_ctx)  # чей это черновик — видно сразу
         self.slot = telegram.slot(chat)
@@ -151,7 +152,6 @@ class Live:
             if not decision.allowed: return
             self._start_typing()
             while not self.closed:
-                if self.app.settings.group('telegram').get('live', 'full') == 'off': break
                 if self.quiet:
                     await self.wait(); continue
                 if not self.fallback and not self._draft_slot():
@@ -166,6 +166,8 @@ class Live:
                     await self.wait(due-now); continue
                 if self.version == self.sent and (self.fallback or now < self.keepalive):
                     await self.wait(None if self.fallback else self.keepalive-now); continue
+                # Настройка — перед отправкой, не на каждом пробуждении: оно бывает на каждый кусок текста модели.
+                if self.app.settings.group('telegram').get('live', 'full') == 'off': break
                 version = self.version
                 payload = {'chat_id':self.chat, 'text':self.render(), 'disable_web_page_preview':True}
                 if self.fallback and not payload['text']:

@@ -59,6 +59,9 @@ KIND_TITLES = {"core": "ядро", "diary": "дневник", "session": "раз
 HALF_LIFE_DAYS = 30.0
 RRF_K = 60
 MAX_CHUNK = 1200
+# Сообщений разговора за одну транзакцию. Пока она идёт (поток поиска посреди хода), замок базы занят и главный цикл
+# ждёт его на любом запросе: 2000 сообщений с FTS на слабом узле — секунды стоящего Telegram (/load 25.11).
+SESSION_BATCH = 200
 
 IMPORTANCE = re.compile(r"<!--\s*importance:\s*(\d+)\s*-->", re.I)
 TRIGGER = re.compile(r"<!--\s*trigger:\s*(.*?)\s*-->", re.I)
@@ -296,7 +299,7 @@ class MemoryIndex:
         return n
 
     def sync_sessions(self, budget: float | None = None) -> int:
-        """Новые сообщения разговоров (по водяному знаку — id последнего проиндексированного), пачками по 2000.
+        """Новые сообщения разговоров (по водяному знаку — id последнего проиндексированного), пачками по SESSION_BATCH.
         budget — сколько секунд можно потратить (поиск посреди хода не должен зависнуть на перенесённой истории
         в десятки тысяч сообщений; недоделанное доделает следующий поиск или уборка). None — до конца."""
         n = 0
@@ -315,8 +318,8 @@ class MemoryIndex:
         key = f"session:{s['id']}"
         doc = self._doc(key, "session", "", s["title"] or s["kind"])
         mark = doc["stamp"] or ""
-        rows = self.store.q("SELECT id, role, data, created_at, meta FROM messages WHERE session_id = ? AND id > ? AND role IN ('user', 'assistant') ORDER BY id LIMIT 2000",
-                            (s["id"], mark))
+        rows = self.store.q("SELECT id, role, data, created_at, meta FROM messages WHERE session_id = ? AND id > ? AND role IN ('user', 'assistant') ORDER BY id LIMIT ?",
+                            (s["id"], mark, SESSION_BATCH))
         if not rows:
             return 0, False
         chunks = []
@@ -345,7 +348,7 @@ class MemoryIndex:
                 chunks.append(Chunk(text=body[i:i + MAX_CHUNK], ref=r["id"] + (f"+{i}" if i else ""), ts=float(r["created_at"]), provenance=prov))
         added = self._replace_chunks(doc["id"], "session", chunks, append=True)
         self.store.x("UPDATE mem_docs SET stamp = ?, updated = ? WHERE id = ?", (rows[-1]["id"], time.time(), doc["id"]))
-        return added, len(rows) == 2000
+        return added, len(rows) == SESSION_BATCH
 
     def add_chunks(self, key: str, kind: str, chunks: list[Chunk], *, title: str = "", replace: bool = True) -> int:
         """Для источников вне файлов и разговоров (факты)."""

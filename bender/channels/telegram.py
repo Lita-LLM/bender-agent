@@ -33,6 +33,7 @@ CODE_TTL = 15 * 60
 STRANGER_REPLY_EVERY = 3600
 RICH_MEDIA_MAX = 10  # сколько картинок/файлов Rich-поста скачивать за раз
 SLOW_ANSWER = 8.0     # дольше до первого слова модели — строка о медленном ответе в журнал
+QUIET_DELTA = 2.0     # с: живого сообщения хода нет — куски текста столько не ищут его заново в базе
 ORDER_WAIT = 30.0     # сколько сообщение чата ждёт обработки предыдущего, прежде чем пойти само
 ANSWER_RETRY = (5.0, 10.0, 20.0)  # повторы ответа после сетевого сбоя
 PAUSE_NOTICE = 30.0   # с какой паузы Telegram за частые сообщения показывать её в пульте и журнале
@@ -144,6 +145,7 @@ class Telegram:
         self._capabilities = {}
         self._albums = {}
         self._recent = {}            # (чат, тема) → последнее простое сообщение хозяина: комментарий к пересланному следом
+        self._quiet = {}             # (агент, сессия) → до какого момента куски текста этого хода не ищут живое сообщение
         self._arrived = {}           # (чат, тема) → когда пришло последнее слово хозяина (отклик по этапам, Live)
         self.timing = collections.deque(maxlen=20)  # отклик последних ответов: где ждали
         self._flushing = {}          # (чат, тема) → пачки, которые уже разбираются после тишины
@@ -387,9 +389,12 @@ class Telegram:
         дописываются номера всех кусков (маршрут у каждого). agent — чьё сообщение: при подписи агентов знак стоит
         и на продолжениях («🦊 (2/3)»). quote — точный фрагмент сообщения reply_to; не принят — ответ без фрагмента."""
         from .telegram_events import capture
-        capture(chat_id,text)
+        command=capture(chat_id,text)  # ответ команды: номера — для маршрута ответа цитатой
+        if command is not None and ids is None:ids=[]
         async with self.sending(chat_id):
-            return await self._send(chat_id,text,buttons=buttons,reply_to=reply_to,quote=quote,ids=ids,agent=agent)
+            try:return await self._send(chat_id,text,buttons=buttons,reply_to=reply_to,quote=quote,ids=ids,agent=agent)
+            finally:
+                if command is not None:command.extend(ids)
 
     async def _send(self, chat_id, text, *, buttons=None, reply_to=None, quote=None, ids=None, agent=None):
         from .telegram_rich import parts,RichFormatError
@@ -1476,7 +1481,9 @@ class Telegram:
                 from .telegram_live import Live
                 draft_id=turn.state.setdefault('telegram_draft',pysecrets.randbelow(2**52-1)+1)
                 live=self._live[key]=Live(self,chat,sid,draft_id,agent_ctx=ctx)
-        if live:live.feed(ev)
+        if live:
+            live.route_seen=ev.get('telegram_route')  # тот же адрес у следующих кусков — быстрый путь _delta
+            live.feed(ev)
 
     async def _finish_answer(self, live, chat, ev, reply_to, deliver,agent_ctx=None):
         if live:
@@ -1543,6 +1550,7 @@ class Telegram:
 
     def _on_event(self, ev: dict) -> None:
         aid=ev.get('agent_id','main')
+        if ev.get('type')=='delta' and self._delta(aid,ev):return
         if ev.get('type') in ('approval','question','notify') and self._userbot_serves(ev):return
         try:ctx=self.app if aid=='*' else self.app.agents.get(aid)
         except HumanError:
@@ -1564,6 +1572,12 @@ class Telegram:
         t=ev.get('type');key=self.route_key(ctx,ev.get('session'))
         # Групповой ход не показывает черновики даже в личке хозяина.
         if not route.get('chat') or route.get('chat')==private:self._stream(ev,chat,ctx)
+        if t=='delta':
+            # Живого сообщения так и не появилось — следующие куски этого хода не ищут его в базе каждый раз.
+            # Ход ещё не отмечен идущим — живое может появиться на следующем куске: тогда не запоминать.
+            if key not in self._live and ctx.mind.running(ev.get('session')):self._quiet[key]=time.monotonic()+QUIET_DELTA
+            return
+        self._quiet.pop(key,None)
         # Ответ на сообщение, пришедшее цитатой не выбранному агенту, — цитатой на него (номер несёт сам ход).
         reply_to=(ev.get('result') or {}).get('telegram_reply_to') if t=='answer' else None
         if t == "answer":
@@ -1605,6 +1619,17 @@ class Telegram:
                           "steer": "✉ Ты написал сообщение — не выполнялось"}.get(str(ev.get("choice") or ""))
                 keyboard = [[{"text": closed, "callback_data": "x"}]] if closed else []  # видно, что это не отказ хозяина (охота 20.11)
                 self._bg_task(self.api("editMessageReplyMarkup", {"chat_id": ref[0], "message_id": ref[1], "reply_markup": {"inline_keyboard": keyboard}}))
+
+    def _delta(self, aid, ev) -> bool:
+        """Кусочек текста модели — самое частое событие (сотни за ответ). Живое сообщение хода уже есть — кусок
+        уходит ему сразу, без хозяина, сессии и настроек из базы: эти запросы на каждый кусок вставали в замок базы,
+        пока его держал другой поток, и цикл замирал (/load 25.11: «цикл стоял в store.py one»). Живого нет и недавно
+        решили, что его не будет (не Telegram, группа, поток выключен), — кусок пропускается до следующего не-куска."""
+        key=(aid,ev.get('session'))
+        live=self._live.get(key)
+        if live is not None and self.state!='off' and live.route_seen==ev.get('telegram_route'):
+            live.feed(ev);return True
+        return self._quiet.get(key,0)>time.monotonic()
 
     def _userbot_serves(self, ev):
         """Хозяин направил одобрения, вопросы и уведомления этого агента в чат его аккаунта Telegram — общий бот их не дублирует."""

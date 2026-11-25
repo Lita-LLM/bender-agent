@@ -109,7 +109,7 @@ function messageText(value){return Array.isArray(value)?value.filter(p=>p.type==
 function forwardText(f={}){const date=f.date?new Date(f.date*1000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';return '↪ переслано от '+(f.name||'неизвестно кого')+(f.count>1?' · '+f.count+' сообщ.':'')+(date?' · '+date:'');}
 function editedTitle(e={}){return e.media?'Заменено вложение':'было: '+(e.old||'')+'\nстало: '+(e.new||'');}
 
-function channelText(meta={}){const route=meta.telegram_route||{};return (CHANNEL_NAMES[meta.channel]||meta.channel||'')+(meta.channel==='telegram'?(meta.telegram_owner_requested||route.chat<0?' · группа':'')+(route.thread?' · тема #'+route.thread:''):'');}
+function channelText(meta={},names={}){const route=meta.telegram_route||{},routed=meta.telegram_reply_routed;return (CHANNEL_NAMES[meta.channel]||meta.channel||'')+(meta.channel==='telegram'?(meta.telegram_owner_requested||route.chat<0?' · группа':'')+(route.thread?' · тема #'+route.thread:''):'')+(routed?' · ответ цитатой'+(routed.selected_agent?', пока выбран «'+(names?.[routed.selected_agent]||routed.selected_agent)+'»':''):'');}
 
 function LinkRequest({ link }) {
   const [done, setDone] = useState("");
@@ -149,7 +149,7 @@ function Message({ m, results, name, onWhat, onReply, onThread, agentNames, onDe
   }
   if (m.role === "user") {
     return html`<div class=${`msg human${m.meta?.queued ? " queued" : ""}`}><div class="me-face">Я</div><div class="m-body">
-      <div class="m-head"><span class="m-name">${m.meta?.correspondence_sender?.name?"Агент "+m.meta.correspondence_sender.name:m.meta?.actor?.startsWith("agent:")?"Агент "+(agentNames?.[m.meta.actor.slice(6)]||m.meta.actor.slice(6)):ACTOR_NAMES[m.meta?.actor] || (m.meta?.actor && m.meta.actor !== "owner" ? "Не хозяин" : "Хозяин")}</span><span class="m-meta">${m.created_at ? timeOf(m.created_at) : ""}${m.meta?.channel ? ' · '+channelText(m.meta) : ''}${deliveryText(m.meta)}${m.meta?.imported ? ` · из ${m.meta.imported === "openclaw" ? "OpenClaw" : m.meta.imported}` : ""}${m.meta?.edited?html` · <span class="m-edited" title=${editedTitle(m.meta.edited)}>изменено</span>`:''}</span>${m.id&&onReply?html`<button class="btn small" onClick=${()=>onReply(m)}>Ответить</button>`:null}<${PendingActions} meta=${m.meta} onDeliver=${onDeliver}/></div>
+      <div class="m-head"><span class="m-name">${m.meta?.correspondence_sender?.name?"Агент "+m.meta.correspondence_sender.name:m.meta?.actor?.startsWith("agent:")?"Агент "+(agentNames?.[m.meta.actor.slice(6)]||m.meta.actor.slice(6)):ACTOR_NAMES[m.meta?.actor] || (m.meta?.actor && m.meta.actor !== "owner" ? "Не хозяин" : "Хозяин")}</span><span class="m-meta">${m.created_at ? timeOf(m.created_at) : ""}${m.meta?.channel ? ' · '+channelText(m.meta,agentNames) : ''}${deliveryText(m.meta)}${m.meta?.imported ? ` · из ${m.meta.imported === "openclaw" ? "OpenClaw" : m.meta.imported}` : ""}${m.meta?.edited?html` · <span class="m-edited" title=${editedTitle(m.meta.edited)}>изменено</span>`:''}</span>${m.id&&onReply?html`<button class="btn small" onClick=${()=>onReply(m)}>Ответить</button>`:null}<${PendingActions} meta=${m.meta} onDeliver=${onDeliver}/></div>
       ${m.meta?.forward?html`<div class="m-forward">${forwardText(m.meta.forward)}</div>`:null}
       <div class="m-text" dangerouslySetInnerHTML=${{ __html: mdToHtml(messageText(m.content)) }}></div><${Attachments} items=${m.meta?.attachments||[]}/></div></div>`;
   }

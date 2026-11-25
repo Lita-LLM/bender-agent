@@ -159,6 +159,31 @@ class FlockTelegramTest(TempDirCase):
             self.assertNotIn('служебно', content(self.user_text(app, 'Привет')))
 
     @async_test
+    async def test_quote_to_command_output_goes_to_its_agent(self):
+        """Ответ цитатой на вывод команды (/status) — агенту, о котором была команда, а не выбранному сейчас."""
+        async with MindEnv(self.tmp) as env:
+            app, tg, (luna,) = await self.flock(env, 'message')
+            tg.choose(42, luna)
+            before = len(self.sent(env))
+            await tg._handle(owner(1001, '/status'))
+            await self.until(lambda: len(self.sent(env)) > before)
+            reply = self.sent(env)[before]['message_id']
+            self.assertEqual(telegram_refs.route(app, 42, reply)['agent'], luna.agent_id)
+            env.script([{'text': 'Луна про статус.'}])
+            tg.choose(42, app)
+            await tg._handle(owner(1002, 'Что это значит?', reply=reply))
+            await self.until(lambda: any('Луна про статус' in m['text'] for m in self.answers(env)), timeout=15)
+            await self.until(lambda: not tg._bg)
+            self.assertIsNotNone(self.user_text(luna, 'Что это значит?'))
+            self.assertIsNone(self.user_text(app, 'Что это значит?'))
+            # /agent меняет выбор: ответ на его вывод — новому выбранному
+            before = len(self.sent(env))
+            await tg._handle(owner(1003, '/agent ' + agent_name(luna)))
+            await self.until(lambda: len(self.sent(env)) > before)
+            self.assertEqual(tg.selected(42)[0].agent_id, luna.agent_id)
+            self.assertEqual(telegram_refs.route(app, 42, self.sent(env)[before]['message_id'])['agent'], luna.agent_id)
+
+    @async_test
     async def test_quote_to_neighbour_chunk_and_approval_card(self):
         async with MindEnv(self.tmp) as env:
             app, tg, (luna,) = await self.flock(env, 'message')

@@ -89,10 +89,13 @@ def edit_text(number,sent,old,new,*,now=None,media_note='',command=False):
 
 
 def capture(chat,text):
+    """Ответ команды в её чат: текст — в историю, список номеров (None — не команда) — для маршрута ответа цитатой."""
     record=REPLIES.get()
     if record is not None and int(chat)==record['chat'] and getattr(chat,'thread',None)==record['thread']:
         from ..mind.passport import clean
         record['reply']=clean(record['ctx'],str(text),stream=True)[:2000]
+        return record['ids']
+    return None
 
 
 def record(ctx,sid,chat,label,*,reply='',meta=None,tainted=False,continue_turn=False):
@@ -110,7 +113,7 @@ def record(ctx,sid,chat,label,*,reply='',meta=None,tainted=False,continue_turn=F
 async def dispatch(commands,ctx,chat,sid,command,arg):
     from .telegram_commands import ALIASES,COMMANDS
     command=ALIASES.get(command,command)
-    captured={'chat':int(chat),'thread':getattr(chat,'thread',None),'reply':'','ctx':ctx}
+    captured={'chat':int(chat),'thread':getattr(chat,'thread',None),'reply':'','ctx':ctx,'ids':[]}
     token=REPLIES.set(captured)
     try:handled=await commands.dispatch(ctx,chat,sid,command,arg)
     finally:REPLIES.reset(token)
@@ -120,7 +123,11 @@ async def dispatch(commands,ctx,chat,sid,command,arg):
         record(ctx,sid,chat,'хозяин вызвал /'+name,reply=reply,meta={'telegram_command':name})
         from ..core.errors import HumanError
         try:selected,new_sid=commands.tg.selected(chat)
-        except HumanError:return handled
+        except HumanError:selected,new_sid=None,None
+        # Ответ цитатой на вывод команды (/status, /load…) — агенту, с которым хозяин говорит после неё:
+        # тому же, или новому после /agent. Иначе он ушёл бы тому, кто выбран в момент ответа.
+        if captured['ids']:commands.tg._route_only(selected or ctx,chat,list(dict.fromkeys(captured['ids'])),new_sid if selected else sid)
+        if selected is None:return handled
         if (selected.agent_id,new_sid)!=(ctx.agent_id,sid):record(selected,new_sid,chat,'хозяин выбрал этот разговор командой /'+name)
     return handled
 
