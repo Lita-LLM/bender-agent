@@ -493,6 +493,13 @@ class Userbot:
         except (HumanError, ValueError, KeyError) as error:
             return [], self.media_word(m)[:-1] + ' — не скачано: ' + (error.hint if isinstance(error, HumanError) else 'сбой')[:200] + ']'
 
+    @staticmethod
+    def forward_source(m):
+        """« · от: … · написано …» — тот же вид, что у бота Telegram; чужое имя только внутри недоверенной рамки."""
+        from ..channels.telegram_forward import from_userbot, source
+        line = source([from_userbot(m.get('forward'))])
+        return ' · ' + line if line else ''
+
     async def from_owner(self, m):
         text = str(m.get('text') or '').strip()
         if text.startswith('/') and await self.command(text):
@@ -503,7 +510,7 @@ class Userbot:
         sid = self.session(owner['user_id'], 'хозяин')
         attachments, note = await self.attach(m, sid, by_owner=True)
         tainted = bool(attachments) or bool(m.get('forward'))
-        body = untrusted('пересланное хозяином', text) if m.get('forward') and text else text
+        body = untrusted('пересланное хозяином' + self.forward_source(m), text) if m.get('forward') and text else text
         line = '[TG #' + str(m['id']) + '] ' + '\n'.join(x for x in (body, note) if x)
         await self.ctx.mind.say(sid, line, channel='userbot', actor='owner', tainted=tainted, wait=False,
                                 content=media.content(line, attachments, vision=self.ctx.settings.get('attachments', 'vision', True)) if attachments else None,
@@ -526,7 +533,7 @@ class Userbot:
         own = by_owner and not m.get('forward')  # слова самого хозяина — не чужой текст; пересланное им — чужой
         if not own:
             who = 'хозяин переслал' if by_owner else str(sender.get('name') or sender.get('id'))[:80] + (' (@' + sender['username'] + ')' if sender.get('username') else '')
-            lines.append('От: ' + who + ('' if not m.get('reply_to') else ' · ответ на #' + str(m['reply_to'])) + (' · переслано' if m.get('forward') else ''))
+            lines.append('От: ' + who + ('' if not m.get('reply_to') else ' · ответ на #' + str(m['reply_to'])) + (' · переслано' + self.forward_source(m) if m.get('forward') else ''))
             lines.append(body)
         tail = 'Твой ответ уйдёт в этот чат.' if row['reply'] else 'Ответы в этот чат хозяин не включал: твой итог увидит только он в пульте.'
         head = '[Аккаунт Telegram · чат ' + str(cid) + ' · #' + str(m['id']) + (' · пишет хозяин' if by_owner else ' · пишет не хозяин') + '] ' + tail

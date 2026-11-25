@@ -2,11 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from ..core.settings import SCHEMA, NeedsOwner
 from ..guard.policy import Action
 from .registry import ToolContext, ToolResult
+
+
+def cpu_stamp(ts) -> str:
+    from ..body.load import stamp
+    return stamp(ts)
+
+
+def load_numbers(watch) -> str:
+    """Числа анализа нагрузки одной строкой — только числа, без имён процессов."""
+    from ..core.loadwatch import numbers_line
+    now = watch.brief()
+    if not now.get("enabled") or now.get("own") is None:
+        return ""
+    line = numbers_line(now, now.get("cores"))
+    if now.get("own_5m") is not None:
+        line += f" · Бендер за 5 мин {now['own_5m']:.0f}%"
+    if now.get("lag") is not None:
+        line += f" · задержка цикла {now['lag']} с"
+    return "Процессор: " + line
 
 
 def render_plan(items: list[dict]) -> str:
@@ -130,9 +150,45 @@ def register(reg) -> None:
         """Нагрузка и самочувствие машины: память, диск, батарея, температура, расходы и режим. Названия моделей, цепочки и свои папки — about_me."""
         snap = ctx.app.body.snapshot(full=True)
         text = ctx.app.body.describe(snap)
+        cpu = load_numbers(ctx.app.host.load_watch)
+        if cpu:
+            text += "\n" + cpu
         if snap.get("top"):
             text += "\nБольше всех памяти едят: " + ", ".join(f"{p['name']} {p['rss_mb']} МБ" for p in snap["top"][:5])
         return ToolResult(text, summary=f"самочувствие: {snap['mood']['word']}", data=snap)
+
+    @reg.tool("load_report", "Нагрузка узла", group="self")
+    async def load_report(ctx: ToolContext, part: str = "now") -> ToolResult:
+        """Процессор и память Бендера и всей машины: числа сейчас и за час, кто берёт процессор, последний отчёт о необычной нагрузке. Только чтение: ничего не завершает и не меняет.
+
+        part — now: числа и процессы сейчас (полсекунды замера); report: последний отчёт «кто грузит» целиком
+        """
+        from .web import untrusted
+        watch = ctx.app.host.load_watch
+        if not watch.cfg.get("enabled"):
+            return ToolResult("Анализ нагрузки выключен хозяином (Настройки → Нагрузка): числа не собираются.", summary="нагрузка: выключено")
+        if part == "report":
+            found = await asyncio.to_thread(watch.latest)
+            if not found:
+                return ToolResult("Отчётов о необычной нагрузке нет: они появляются, только когда она была.", summary="нагрузка: отчётов нет")
+            path, text = found
+            # имена и строки запуска чужих процессов подбирает кто угодно на машине
+            return ToolResult(f"Отчёт {path}:\n" + untrusted("отчёт о нагрузке узла", text[:20000]), tainted=True, summary="нагрузка: отчёт")
+        lines = [load_numbers(watch) or "Замеров ещё нет (Бендер запущен не через bender run или только что стартовал)."]
+        summary = watch.summary()
+        if summary.get("samples"):
+            parts = [f"{title} ср {summary[key]['avg']}, макс {summary[key]['max']}" for key, title in (("own", "Бендер %"), ("sys", "узел %"), ("load1", "load"), ("lag", "задержка цикла, с")) if key in summary]
+            lines.append(f"За {summary['minutes']} мин: " + "; ".join(parts))
+        for a in list(watch.anomalies)[-5:]:
+            lines.append(f"Необычное {cpu_stamp(a['started'])}: {a['title']} — {a['reason']}" + (" (спала)" if a.get("ended") else " (идёт)") + (f"; отчёт {a['report']}" if a.get("report") else ""))
+        top = await asyncio.to_thread(watch.top_now, 0.5, 6)
+        text = "\n".join(lines)
+        tainted = False
+        if top:
+            rows = "\n".join(f"{row['pid']} {row['comm']} — {row['cpu_pct']}% ядра · {row['rss_mb']} МБ" + (f" · {row['bender']}" if row.get("bender") else "") for row in top)
+            text += "\nКто берёт процессор сейчас:\n" + untrusted("процессы узла", rows)
+            tainted = True
+        return ToolResult(text, tainted=tainted, summary="нагрузка", data=watch.brief())
 
     @reg.tool("about_me", "Кто я", group="self")
     async def about_me(ctx: ToolContext, topic: str = "status") -> ToolResult:
@@ -162,7 +218,11 @@ def register(reg) -> None:
             return ToolResult(text, summary="вопрос хозяину передан")
         if ctx.unattended:
             return ToolResult("Хозяина рядом нет — спросить сейчас нельзя. Отложи вопрос (запиши в дневник) или действуй в рамках полномочий.", ok=False, summary="некого спросить")
-        answer = await ctx.app.ask_owner(question, [str(o) for o in (options or [])][:8], session_id=ctx.session_id)
+        from ..mind import steer
+        answer = await ctx.app.ask_owner(question, [str(o) for o in (options or [])][:8], session_id=ctx.session_id, steer=steer.event(ctx.turn))
+        if answer == steer.STEERED:
+            return ToolResult("Вопрос закрыт без ответа: хозяин написал новое сообщение — прочитай его на следующем шаге. Если ответ всё ещё нужен, спроси снова.",
+                              ok=False, summary="вопрос закрыт: слово хозяина", data={"steered": True})
         if answer is None:
             return ToolResult("Хозяин не ответил.", ok=False, summary="без ответа")
         return ToolResult(f"Ответ хозяина: {answer}", summary=f"❓ {question[:40]} → {answer[:40]}")

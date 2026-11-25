@@ -16,7 +16,7 @@ def routes(router, host, J, body):
 
     @router.route('GET','/api/agents')
     @J
-    async def listing(req):return {'agents':host.agents.public()}
+    async def listing(req):return {'agents':host.agents.public(),'node_manager':host.settings.get('load','manager','')}
 
     @router.route('GET','/api/agent-templates')
     @J

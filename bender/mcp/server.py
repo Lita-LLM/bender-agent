@@ -90,6 +90,13 @@ class McpServer:
             return {"content": [{"type": "text", "text": f"Тул «{name}» этому ходу не выдан."}], "isError": True}
         if agent_ctx.guard.halted:
             return {"content": [{"type": "text", "text": "Стоп-кран: хозяин остановил все действия."}], "isError": True}
+        from ..mind import steer
+        if steer.pending(getattr(turn, "state", None)):
+            # Вставка в CLI-движок: его цикл внутри одного вызова, поэтому слово хозяина приходит результатом
+            # ближайшего тула; ещё не начатый вызов не выполняется — как в пакете API-модели.
+            words = self.inbox_blocks(turn)
+            if words:
+                return {"content": [{"type": "text", "text": f"Вызов {name} не выполнен: " + steer.READ_FIRST + " его."}] + words, "isError": False}
         b.calls += 1
         cid = f"mcp_{int(time.time() * 1000) % 10_000_000}_{b.calls}"
         agent_ctx.mind.publish(sid, {"type": "tool_start", "id": cid, "name": name, "arguments": args})
@@ -109,7 +116,36 @@ class McpServer:
         # картинка из read_file или чужого MCP — изображением, как API-моделям (звук MCP не передаёт)
         content += [{"type": "image", "data": part["data"], "mimeType": part.get("media_type", "image/png")}
                     for part in getattr(r, "model_parts", None) or [] if part.get("type") == "image" and part.get("data")]
+        content += self.inbox_blocks(turn)  # пока тул работал, пришло слово хозяина (или итог помощника) — сразу модели
         return {"content": content, "isError": not r.ok}
+
+    def inbox_blocks(self, turn) -> list[dict]:
+        """Ждущее в очереди хода — в историю Бендера (как на границе шага у API-модели) и блоками результата
+        тула для CLI-движка. Слово хозяина помечено меткой с одноразовым кодом из промпта этого вызова
+        (router/cli.py): текст из сети или файла её не подделает."""
+        inbox = list(getattr(turn, "inbox", None) or [])
+        mind = getattr(self.app, "mind", None)
+        if not inbox or mind is None or mind.turns.get(turn.session_id) is not turn:
+            return []
+        from ..core.dates import content as labelled
+        from ..router.cli import flatten
+        mind._flush_inbox(turn)
+        nonce = str(turn.state.get("_cli_nonce") or "")
+        now = time.time()
+        blocks: list[dict] = []
+        for msg, meta in inbox:
+            images: list = []
+            row = {"role": "user", "content": msg.get("content"), "created_at": now,
+                   "meta": {**meta, "mid_turn": meta.get("delivery") == "insert"}}
+            # Как у API-модели: чужие куски уже в рамках канала (пересланное, цитата), заражение хода — при вставке.
+            text = flatten(labelled(row), images)
+            owner = meta.get("actor") == "owner" and not meta.get("service_event")
+            head =(f"⟦хозяин {nonce}⟧ Новое сообщение хозяина посреди хода:" if owner and nonce
+                    else "Сообщение Бендера во время хода (не слова хозяина):")
+            blocks.append({"type": "text", "text": head + "\n" + text})
+            blocks += [{"type": "image", "data": i["source"]["data"], "mimeType": i["source"].get("media_type", "image/png")}
+                       for i in images if (i.get("source") or {}).get("data")]
+        return blocks
 
 
 class McpLoop:

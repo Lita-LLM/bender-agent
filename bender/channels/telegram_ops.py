@@ -77,16 +77,64 @@ def journal_text(ctx, arg: str = '') -> str:
     return 'Бортжурнал (новое сверху):\n' + '\n'.join(f"{calendar(r['ts'])} · {r['kind']} · {str(r['summary'])[:160]}" for r in rows)
 
 
-def load_text(host) -> str:
+def cpu_lines(host, top: list | None = None, private: bool = True) -> list[str]:
+    """Числа анализа нагрузки: ЦП Бендера и узла, память, кто берёт процессор, последнее необычное.
+    private=False (группа) — без виновника: в нём имена процессов машины хозяина."""
+    from ..core.loadwatch import numbers_line
+    watch = host.load_watch
+    now = watch.brief()
+    if not now['enabled']:
+        return ['Анализ нагрузки выключен (Настройки → Нагрузка).']
+    lines = []
+    if now.get('own') is None:
+        lines.append('Замеров ЦП ещё нет: они идут раз в ' + str(watch.cfg.get('sample_seconds') or 10) + ' с после запуска через bender run.')
+    else:
+        own = f"ЦП Бендера: {now['own']:.0f}% ядра"
+        if now.get('own_1m') is not None:
+            own += f" (за минуту {now['own_1m']:.0f}%" + (f", за 5 мин {now['own_5m']:.0f}%" if now.get('own_5m') is not None else '') + ')'
+        lines.append(own + '.')
+        rest = numbers_line({k: now.get(k) for k in ('sys', 'iowait', 'load1', 'mem', 'swap', 'temp')}, now.get('cores'))
+        if rest:
+            lines.append('Узел: ' + rest + '.')
+        elif now.get('node'):
+            from ..body.load import UNAVAILABLE, platform_note
+            lines.append('Узел: ' + UNAVAILABLE + (' — ' + platform_note() if platform_note() else '') + '.')
+        if now.get('throttled'):
+            lines.append('Raspberry Pi: ' + ', '.join(now['throttled']) + '.')
+    if top:
+        lines.append('Процессор берут: ' + '; '.join(f"{row['comm']} ({row['pid']}, {row['cpu_pct']:.0f}%" + (f", {row['bender']}" if row.get('bender') else '') + ')' for row in top[:3]) + '.')
+    last = now.get('last')
+    if last:
+        state = f"спала через {max(1, round((last['ended'] - last['at']) / 60))} мин" if last.get('ended') else 'идёт сейчас'
+        lines.append(f"Последнее необычное: {calendar(last['at'])} — {last['title']}: {last['reason']}" + (f". Виновник: {last['culprit']}" if last.get('culprit') and private else '')
+                     + f" ({state})." + (' Отчёт — /load report.' if last.get('report') else ''))
+    else:
+        lines.append('Необычной нагрузки с запуска не было.')
+    manager = watch.cfg.get('manager') or ''
+    if manager:
+        name = next((a['name'] for a in host.agents.public() if a['id'] == manager), manager)
+        when = {'off': 'не зовётся', 'bender': 'зовётся при нагрузке Бендера', 'node': 'зовётся при нагрузке узла'}.get(watch.cfg.get('manager_on'), 'зовётся при любой необычной')
+        lines.append(f'Заведующий узлом: {name}, {when} · /load manager.')
+    else:
+        lines.append('Заведующий узлом не выбран · /load manager.')
+    return lines
+
+
+def load_text(host, top: list | None = None, private: bool = True) -> str:
     agents = host.agents
     watch = getattr(host, 'loop_watch', None)
     lines = ['Нагрузка']
+    try:
+        lines += cpu_lines(host, top, private)
+    except Exception:  # noqa: BLE001 — числа нагрузки не должны ломать остальной ответ
+        lines.append('Числа нагрузки сейчас недоступны.')
     if watch is not None:
         lag = watch.lag
         lines.append(f'Цикл отвечает за {lag:.1f} с (норма меньше секунды)' + (' — перегружен, плановые дела ждут.' if agents.overloaded() else '.'))
         if watch.recent:
             last = watch.recent[-1]
-            lines.append(f"Последнее зависание: {calendar(last['started'])}, {last['seconds']} с, в {last['where']}.")
+            from ..core.stall import told
+            lines.append(f"Последнее зависание: {calendar(last['started'])}, {last['seconds']} с — {told(last)}.")
     else:
         lines.append('Сторож цикла не запущен (запуск не через bender run).')
     running = []
@@ -106,4 +154,18 @@ def load_text(host) -> str:
         lines.append('Задачи команды идут.')
     loaded = sum(1 for r in agents.public() if r['loaded'])
     lines.append(f'Агентов в памяти: {loaded}.')
+    lines += timing_lines(getattr(host, 'telegram', None))
     return '\n'.join(lines)
+
+
+def timing_lines(tg) -> list[str]:
+    """Отклик Telegram за последние ответы: где ждали — до хода, модель до первого слова, весь ответ (медианы)."""
+    items = list(getattr(tg, 'timing', None) or [])
+    if not items:
+        return []
+    def mid(key):
+        values = sorted(i[key] for i in items)
+        return f'{values[len(values) // 2]:.1f}'.replace('.', ',')
+    slow = max(items, key=lambda i: i['total'])
+    return [f"Отклик Telegram (последних ответов: {len(items)}, медиана): до хода {mid('queue')} с, модель до первого слова {mid('model')} с, "
+            f"весь ответ {mid('total')} с; самый долгий — {slow['total']:.0f} с, из них модель {slow['model']:.0f} с."]

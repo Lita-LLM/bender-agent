@@ -11,8 +11,9 @@ def supports(candidate,ext):
     return candidate.provider.get('kind','openai') in ('openai','chatgpt') and value(candidate,'audio_input') is not False and isinstance(formats,list) and ext in formats
 
 
-def transcript_text(result,*,seconds=0,from_owner=True):
-    """Речь остаётся различимой с обычным текстом, без выдуманной уверенности STT."""
+def transcript_text(result,*,seconds=0,from_owner=True,wrap=True):
+    """Речь остаётся различимой с обычным текстом, без выдуманной уверенности STT.
+    wrap=False — пересланное уже внутри общей недоверенной рамки пересланного: вторая рамка не нужна."""
     model=result.get('model','')
     source='GigaAM' if model.startswith('gigaam') else model
     label='голосовое хозяина' if from_owner else 'пересланное голосовое, недоверенные данные'
@@ -22,7 +23,7 @@ def transcript_text(result,*,seconds=0,from_owner=True):
     if 'confidence' in result:details.append('уверенность '+str(round(result['confidence']*100))+'%')
     if result.get('gaps'):details.append('пропуски: '+'; '.join(result['gaps']))
     said=result.get('text') or 'Голосовое сообщение.'
-    if not from_owner:
+    if not from_owner and wrap:
         from ..tools.web import untrusted
         said=untrusted('расшифровка пересланного голосового',said)
     return '['+', '.join(details)+']\n'+said

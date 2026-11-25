@@ -7,8 +7,10 @@ import os
 import shlex
 import signal
 import sys
+import time
 
 from ..guard import sandbox
+from ..mind import steer
 from .registry import ToolContext, ToolResult
 
 MAX_CAPTURE = 200_000
@@ -113,21 +115,48 @@ def register(reg) -> None:
                     ctx.progress(b.decode("utf-8", "replace")[-200:])
 
         timed_out = False
+        adopted = None
         completion = asyncio.gather(pump(), proc.wait())
+        started = time.monotonic()
         try:
-            await asyncio.wait_for(completion, timeout)
-        except asyncio.TimeoutError:
-            timed_out = True
+            # Слово хозяина (режим «вставлять») прерывает ожидание, но не команду: она уходит в фон с номером.
+            outcome = await steer.wait(steer.event(ctx.turn), completion, timeout)
+            if outcome == 'steer':
+                if agent_ctx.processes.can_adopt():
+                    completion.cancel()  # читатель вывода переходит к фоновому процессу; сам процесс не трогаем
+                    await asyncio.gather(completion, return_exceptions=True)
+                    if proc.returncode is None:
+                        adopted = agent_ctx.processes.adopt(ctx, proc, prepared, command, b"".join(chunks), timeout - (time.monotonic() - started))
+                    else:  # успела закончиться сама: дочитываем хвост вывода
+                        try:
+                            chunks.append((await asyncio.wait_for(proc.stdout.read(), 5))[:MAX_CAPTURE])
+                        except (asyncio.TimeoutError, OSError, ValueError):
+                            pass
+                        outcome = 'done'
+                else:  # фоновые команды выключены — честно дожидаемся конца, ничего не бросая
+                    outcome = await steer.wait(None, completion, max(0.1, timeout - (time.monotonic() - started)))
+            timed_out = outcome == 'timeout'
         finally:
-            # Группу добиваем всегда: фоновый потомок (`prog &`) переживал выход лидера и таймаут (охота 16.11).
-            alive = proc.returncode is None
-            _kill(proc)
-            if alive:
-                await proc.wait()
-            if not completion.done():
-                completion.cancel()
-            await asyncio.gather(completion, return_exceptions=True)
-            prepared.close()
+            if adopted is None:
+                # Группу добиваем всегда: фоновый потомок (`prog &`) переживал выход лидера и таймаут (охота 16.11).
+                alive = proc.returncode is None
+                _kill(proc)
+                if alive:
+                    await proc.wait()
+                if not completion.done():
+                    completion.cancel()
+                await asyncio.gather(completion, return_exceptions=True)
+                prepared.close()
+        out = b"".join(chunks).decode("utf-8", "replace")
+        if adopted is not None:
+            agent_ctx.journal.write("exec", f"Команда: {command[:200]}", actor=ctx.actor,
+                                    data={"command": command[:2000], "code": None, "background": adopted, "cwd": str(workdir), "sandbox": info["kind"], "secrets": used})
+            left = max(1, int(timeout - (time.monotonic() - started)))
+            text = (f"[команда ещё работает — пришло сообщение хозяина, ожидание прервано; команда НЕ остановлена]\n"
+                    f"Теперь это фоновый процесс {adopted} (pid {proc.pid}), проживёт ещё до {left} с. "
+                    f"Вывод — process_status id={adopted}, остановить — process_stop id={adopted}.\nВывод до этого момента:\n" + _clip(out))
+            return ToolResult(text, ok=True, tainted=_reads_untrusted(agent_ctx, command, workdir, allow_net),
+                              summary=f"{command[:60]} → в фоне ({adopted})", data={"code": None, "steered": True, "process": adopted, "pid": proc.pid})
         out = b"".join(chunks).decode("utf-8", "replace")
         low=out.lower()
         if proc.returncode and not allow_net and any(word in low for word in ('could not resolve','name resolution','network is unreachable','name or service not known','bad owner or permissions')):

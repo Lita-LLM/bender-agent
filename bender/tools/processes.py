@@ -29,7 +29,29 @@ class Processes:
         identifier = new_id()
         item = {"process": proc, "output": bytearray(), "session": ctx.session_id, "timeout": False}
         limit = max(1, min(int(timeout), self.app.settings.get("processes", "timeout_seconds", 1800)))
+        self._watch(ctx, identifier, item, proc, prepared, limit)
+        self.app.journal.write("exec", f"Фоновая команда {identifier}: {command[:200]}", actor=ctx.actor,
+                               data={"pid": proc.pid, "cwd": str(workdir), "sandbox": info["kind"]})
+        return identifier
 
+    def can_adopt(self) -> bool:
+        """Можно ли увести уже запущенную команду run в фон: фоновые команды включены и есть место."""
+        if self.app.safe or not self.app.settings.get("processes", "enabled", True):
+            return False
+        running = sum(not x["task"].done() for x in self.items.values()) + self.starting
+        return running < self.app.settings.get("processes", "max_running", 4)
+
+    def adopt(self, ctx, proc, prepared, command, output: bytes, seconds: float) -> str:
+        """Команда run продолжает работать фоновой: пришло слово хозяина, ожидание прервано, процесс не убит.
+        Вывод до этого момента сохраняется, срок жизни — оставшийся от run."""
+        identifier = new_id()
+        item = {"process": proc, "output": bytearray(output[-MAX_CAPTURE:]), "session": ctx.session_id, "timeout": False}
+        self._watch(ctx, identifier, item, proc, prepared, max(1.0, float(seconds)))
+        self.app.journal.write("exec", f"Команда ушла в фон по слову хозяина ({identifier}): {command[:200]}", actor=ctx.actor,
+                               data={"pid": proc.pid, "seconds": int(seconds)})
+        return identifier
+
+    def _watch(self, ctx, identifier, item, proc, prepared, limit):
         async def pump():
             while True:
                 chunk = await proc.stdout.read(65536)
@@ -62,9 +84,6 @@ class Processes:
                 break
             if self.items[old]["task"].done():
                 del self.items[old]
-        self.app.journal.write("exec", f"Фоновая команда {identifier}: {command[:200]}", actor=ctx.actor,
-                               data={"pid": proc.pid, "cwd": str(workdir), "sandbox": info["kind"]})
-        return identifier
 
     def get(self, identifier, ctx):
         item = self.items.get(identifier)

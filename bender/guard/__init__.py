@@ -326,6 +326,11 @@ class Guard:
         return d
 
     async def _ask(self, a: Action, d: Decision, session_id: str | None, *, sweepable: bool = False) -> Decision:
+        from ..mind import steer
+        # Вставка слова хозяина: карточку агента не открываем и не держим — сначала он прочитает сообщение.
+        nudge = steer.of_session(self.app, session_id) if a.actor != 'owner' else None
+        if nudge is not None and nudge.is_set():
+            return Decision("deny", "Не спрошено: " + steer.READ_FIRST + " запрос. Действие не выполнялось.", "steer")
         pid = new_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         choice = "cancelled"
@@ -344,9 +349,8 @@ class Guard:
         self.pending[pid] = {"card": card, "future": fut, "action": a, "guard": self, "sweepable": sweepable}
         self.app.bus.publish({"type": "approval", "agent_id":"*", "card": card})
         try:
-            choice = await asyncio.wait_for(asyncio.shield(fut), timeout)
-        except asyncio.TimeoutError:
-            choice = "timeout"
+            outcome = await steer.wait(nudge, asyncio.shield(fut), timeout)
+            choice = fut.result() if outcome == 'done' else outcome  # timeout | steer
         except BaseException:
             choice = "cancelled"
             raise
@@ -368,6 +372,9 @@ class Guard:
                                     "повтори позже, когда хозяин будет на связи, или спроси его.", "timeout")
         if choice == "halt":
             return Decision("deny", "Стоп-кран.", "halt")
+        if choice == "steer":
+            return Decision("deny", "Карточка закрыта без ответа: хозяин написал новое сообщение. Действие не выполнялось; "
+                                    "прочитай сообщение на следующем шаге и, если действие всё ещё нужно, запроси снова.", "steer")
         return Decision("deny", "Хозяин отклонил — действие не выполнялось.", "owner:deny")
 
     def respond(self, pid: str, choice: str, by: str = "owner") -> bool:

@@ -49,6 +49,9 @@ def content(row):
     label = message_prefix(row)
     number=(row.get('meta') or {}).get('telegram_message_id')
     if isinstance(number,int):label += (' ' if label else '') + f'[#{number}]'
+    if row.get('role') == 'user' and (row.get('meta') or {}).get('mid_turn'):
+        from ..mind.steer import MARK  # слово хозяина, вставленное посреди хода: модель решает, менять ли план
+        label += ('\n' if label else '') + MARK
     if not label: return value
     if isinstance(value, list): return [{'type': 'text', 'text': label + '\n'}, *value]
     return label + '\n' + str(value or '')

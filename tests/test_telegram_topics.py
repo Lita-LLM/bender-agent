@@ -85,7 +85,8 @@ class TopicsTest(TempDirCase):
             with patch.object(app.voice,'speak',voice):await tg._answer(address,sid,{'text':'Ответ голосом.'},agent_ctx=app)
             audio=self.sent(env,'sendVoice')[0]
             self.assertEqual(int(audio['message_thread_id']),address.thread)
-            self.assertIn('42:'+str(audio['message_id']),app.store.meta_get('telegram:refs'))
+            from bender.channels import telegram_refs
+            self.assertEqual(telegram_refs.ref(app,42,audio['message_id'])['thread'],address.thread)
             app.store.update_session(sid,title='Новый заголовок')
             await tg.topics.rename(app,sid)
             edit=self.sent(env,'editForumTopic')[-1]

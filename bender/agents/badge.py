@@ -1,6 +1,10 @@
 """Знак агента в сообщениях: «🦊: текст», эмодзи у каждого агента стаи свой. Эмодзи из IDENTITY.md, если его ещё не занял
-другой агент стаи; иначе — первый свободный из палитры. Выбор запоминается в записи стаи,
-поэтому знак не прыгает от сообщения к сообщению."""
+другой агент стаи; иначе — прежний знак агента; иначе первый свободный из палитры. Выбор запоминается в записи стаи,
+поэтому знак не прыгает от сообщения к сообщению.
+
+Правила простые: знак агента, уже записанный в стае, другому не отдаётся — и знак агента в архиве тоже (его старые
+сообщения в чате не должны выглядеть словами нового соседа), пока в палитре есть свободные. 🤖 палитра бережёт для
+главного: новый агент его не получает, если главный ещё не выбрал себе другой. Временные помощники знаки не держат."""
 import json
 
 from ..core.store import dumps
@@ -24,12 +28,19 @@ def emoji(ctx):
     row = host.store.one('SELECT data FROM flock_agents WHERE id=?', (agent,))
     if not row: return want or PALETTE[0]
     data = json.loads(row['data'] or '{}')
-    taken = set()
-    for other in host.store.q('SELECT data FROM flock_agents WHERE id!=? AND archived=0', (agent,)):
-        taken.add(json.loads(other['data'] or '{}').get('badge'))
+    taken, resting, main = set(), set(), None
+    for other in host.store.q('SELECT id, archived, temporary, data FROM flock_agents WHERE id!=?', (agent,)):
+        badge = json.loads(other['data'] or '{}').get('badge')
+        if other['id'] == 'main': main = badge
+        if not badge or other['temporary'] and other['archived']: continue
+        (resting if other['archived'] else taken).add(badge)
     current = data.get('badge')
-    choice = want if want and want not in taken else current if current and current not in taken else \
-        next((e for e in PALETTE if e not in taken), PALETTE[0])
+    reserved = {PALETTE[0]} if agent != 'main' and main in (None, PALETTE[0]) else set()
+    free = [e for e in PALETTE if e not in taken and e not in resting and e not in reserved]
+    if not free: resting, free = set(), [e for e in PALETTE if e not in taken and e not in reserved]  # палитра кончилась — знаки архива снова в ходу
+    blocked = taken | resting
+    choice = want if want and want not in blocked else current if current and current not in taken else \
+        (free[0] if free else PALETTE[0])
     if choice != current:
         data['badge'] = choice
         host.store.x('UPDATE flock_agents SET data=? WHERE id=?', (dumps(data), agent))

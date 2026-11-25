@@ -40,7 +40,7 @@ def register(reg):
         mid=None;attachments=[]
         if channel=='telegram':
             if result:
-                try:mid=await tg.send_voice(chat,result['audio'])
+                try:mid=await tg.send_voice(chat,result['audio'],caption=tg.mark(ctx.app))  # знак агента — подписью голосового
                 except HumanError as error:failure=str(error)
             if failure:mid=await tg.send(chat,tg.signed(ctx.app,text+'\n\nГолос недоступен, отвечаю текстом: '+failure))
             tg.remember(ctx.app,chat,mid,ctx.session_id,text,'out')

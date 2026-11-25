@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from ..core.store import BASE_SCHEMA, Store
+from ..core.store import BASE_SCHEMA, CALLS_TIME, Store
 
 TOKEN = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b[A-Za-z_]\w*\b|[().,]")
 CREATE = re.compile(r'(?is)\bCREATE\s+(?:UNIQUE\s+)?(?:VIRTUAL\s+)?(TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)')
@@ -70,6 +70,7 @@ class NamespaceStore(Store):
         self.agent_id = valid_id(agent_id)
         self.db = Connection(shared.db, agent_id)
         self.migrate('base', 1, BASE_SCHEMA)
+        self.migrate('calls_time', 1, CALLS_TIME)
 
     def _has_meta(self):
         return bool(self.db.raw.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (self.db.prefix+'meta',)).fetchone())

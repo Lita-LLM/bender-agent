@@ -397,7 +397,9 @@ class Team:
 
     # ожидание и отмена
 
-    async def wait(self, ids: list[str], timeout: float = 300, *, session_id=None, background_lease=None) -> list[dict]:
+    async def wait(self, ids: list[str], timeout: float = 300, *, session_id=None, background_lease=None, steer=None) -> list[dict]:
+        """Итоги задач; не дождавшиеся — с waiting. steer — событие хода: слово хозяина прерывает ожидание
+        (помощники работают дальше, итог придёт отдельным сообщением)."""
         futs = []
         for tid in ids:
             t = self.get(tid)
@@ -419,7 +421,18 @@ class Team:
         try:
             if futs:
                 async with self.app.host.agents.pause_background(background_lease):
-                    await asyncio.wait(futs, timeout=max(1.0, min(float(timeout), 1800)))
+                    waiter = asyncio.ensure_future(steer.wait()) if steer is not None else None
+                    deadline = time.monotonic() + max(1.0, min(float(timeout), 1800))
+                    try:
+                        while True:
+                            rest = [f for f in futs if not f.done()]
+                            left = deadline - time.monotonic()
+                            if not rest or left <= 0 or (waiter is not None and waiter.done()):
+                                break
+                            await asyncio.wait(rest + ([waiter] if waiter else []), timeout=left, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        if waiter:
+                            waiter.cancel()
             completed = True
         finally:
             for tid, future in zip(ids, futs):

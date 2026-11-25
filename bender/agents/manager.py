@@ -16,6 +16,7 @@ SCHEMA = ["""CREATE TABLE IF NOT EXISTS flock_agents (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0,
  temporary INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, data TEXT NOT NULL DEFAULT '{}')"""]
 BACKGROUND = ContextVar('bender_background_lane', default=None)
+URGENT_WAIT = 60.0  # срочный безлюдный ход ждёт места в фоновой полосе не дольше минуты
 DESCRIPTION_LIMIT = 200  # короткая визитка агента: чем занимается, в чём силён — не резюме
 
 
@@ -38,14 +39,21 @@ class Agents:
             await asyncio.sleep(2)
 
     @asynccontextmanager
-    async def background(self):
+    async def background(self, urgent=False):
+        """urgent — разбор перегрузки заведующим узлом: не ждёт, пока цикл успокоится (перегрузка — его повод),
+        и ждёт места в полосе не дольше URGENT_WAIT, потом идёт сверх неё. Такой ход один (одна сессия «Узел»)."""
         existing=BACKGROUND.get()
         if existing is not None and existing.owner is asyncio.current_task():
             yield
             return
-        await self.calm()
         lease=BackgroundLease(self.background_limit)
-        await lease.semaphore.acquire();lease.held=True
+        if urgent:
+            end=time.monotonic()+URGENT_WAIT
+            while lease.semaphore.locked() and time.monotonic()<end:await asyncio.sleep(1)
+            if not lease.semaphore.locked():await lease.semaphore.acquire();lease.held=True  # свободно — берётся сразу, без ожидания
+        else:
+            await self.calm()
+            await lease.semaphore.acquire();lease.held=True
         token=BACKGROUND.set(lease)
         try:yield
         finally:
@@ -290,7 +298,8 @@ class Agents:
             else:
                 if physical.startswith(('agent_','flock_')):continue
                 name=physical
-            if name.startswith(('mem_fts','mem_tri')) or name in ('journal',):continue
+            # telegram_refs/telegram_routes — учёт сообщений своего бота, как и meta 'telegram:*': в чужом боте номера ничего не значат.
+            if name.startswith(('mem_fts','mem_tri')) or name in ('journal','telegram_refs','telegram_routes'):continue
             rows=[]
             for row in ctx.store.q('SELECT * FROM "'+name+'"'):
                 data=dict(row)
@@ -337,7 +346,7 @@ class Agents:
                 target.parent.mkdir(parents=True,exist_ok=True);atomic_write(target,archive.read(item))
             known={r['name'][len(ctx.store.db.prefix):] for r in self.host.store.q("SELECT name FROM sqlite_master WHERE type='table'") if r['name'].startswith(ctx.store.db.prefix)}
             for table,rows in data.get('tables',{}).items():
-                if table not in known or table.startswith('mem_') or table in ('journal','settings'):continue
+                if table not in known or table.startswith('mem_') or table in ('journal','settings','telegram_refs','telegram_routes'):continue
                 columns={r['name'] for r in ctx.store.q('PRAGMA table_info("'+table+'")')}
                 for row in rows:
                     value={k:(base64.b64decode(v['$bytes']) if isinstance(v,dict) and set(v)=={'$bytes'} else v) for k,v in row.items() if k in columns}

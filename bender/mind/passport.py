@@ -14,8 +14,9 @@ from ..core.paths import PROGRAM_DIR
 from ..guard import sandbox
 
 
-def clean(agent_ctx, value, *, stream=False):
-    """Даже имя модели/папки не должно протащить известный секрет или URL с логином."""
+def clean(agent_ctx, value, *, stream=False, urls=True):
+    """Даже имя модели/папки не должно протащить известный секрет или URL с логином.
+    urls=False — обычные адреса остаются (правка хозяина), скрываются только адреса с логином/паролем."""
     known = []
     def strings(item):
         if isinstance(item, str):
@@ -38,7 +39,7 @@ def clean(agent_ctx, value, *, stream=False):
                     for size in range(min(len(secret)-1, len(item)), 3, -1):
                         if item.endswith(secret[:size]):
                             item = item[:-size] + '[скрыто]'; break
-            item = re.sub(r'https?://\S+', '[адрес скрыт]', item)
+            item = re.sub(r'https?://\S+' if urls else r'https?://[^\s/@]+@\S*', '[адрес скрыт]', item)
             return item.replace('secrets.json', '[сейф]')
         if isinstance(item, dict): return {visit(k): visit(v) for k, v in item.items()}
         if isinstance(item, (tuple, list)): return [visit(v) for v in item]
@@ -178,7 +179,7 @@ def brief(agent_ctx, turn, candidate):
                     if voice['enabled'] or voice['local']['installed'] or any(voice['roles'].values()) else 'Аудио выключено, Уши/Голос не подключены; подробности about_me.')
         channel = data['channel'] if data['channel'] in ('telegram', 'pult', 'terminal', 'терминал', 'speaker') else data['home_channel']
         telegram_format='Telegram Rich: можно заголовки, таблицы до 20 столбцов, списки/задачи, цитаты, ==mark==, ||spoiler|| и $формулы$. Медиа отправляй send_file.' if data['telegram_rich'] else 'Telegram: короткие абзацы, списки через •, жирный и код можно; без таблиц и заголовков.'
-        formatting = (telegram_format+'  Можно send_message, обычно 1–3 сообщения, без спама. complete=true только если всё уже отправил. Номера [#…] и время [пн 26.10 17:11] перед сообщениями ставит система — сама их не пиши. Номера [#…] — сообщения этого разговора, reply_to у send_message; для ответа финалом начни с ↩#номер. Без номера ответ обычный. react — одна реакция на сообщение.' if channel == 'telegram' else
+        formatting = (telegram_format+'  Можно send_message, обычно 1–3 сообщения, без спама. complete=true только если всё уже отправил. Номера [#…] и время [пн 26.10 17:11] перед сообщениями ставит система — сама их не пиши. Номера [#…] — сообщения этого разговора, reply_to у send_message; для ответа финалом начни с ↩#номер или ↩#номер «дословный кусок». Без номера ответ обычный. react — одна реакция на сообщение.' if channel == 'telegram' else
                       'Терминал: простой текст.' if channel in ('terminal', 'терминал') else SPEAKER if channel == 'speaker' else 'Пульт: полный markdown.')
         speaker_note = (' Реплики с пометкой [Колонка «…»] хозяин сказал вслух, их распознала машина: угадывай слова по смыслу; ответ озвучит колонка — говори коротко, без разметки и эмодзи.'
                         if channel != 'speaker' and agent_ctx.host.settings.get('speakers', 'enabled', False) else '')

@@ -24,8 +24,8 @@ from ..memory import selfdir
 from ..memory.stem import stems
 from . import side
 
-SKIP_CHANNELS = ("heartbeat", "cron", "subagent", "sleep", "team", "mail", "hook")
-SKIP_KINDS = ("polygon", "subagent", "heartbeat", "cron")
+SKIP_CHANNELS = ("heartbeat", "cron", "subagent", "sleep", "team", "mail", "hook", "node")
+SKIP_KINDS = ("polygon", "subagent", "heartbeat", "cron", "node")
 ACK = re.compile(r"^\W*(ок|окей|ok|okay|да|нет|не|ага|угу|спасибо|спс|благодарю|понял|поняла|ясно|хорошо|норм|отлично|класс|супер|го|давай|thanks|thx|yes|no|\+|👍|🙏)\W*$", re.I)
 SECRET = re.compile(r"(sk-[A-Za-z0-9_\-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[abpr]-[A-Za-z0-9\-]{10,}|eyJ[A-Za-z0-9_\-]{20,}\.|"
                     r"\b\d{6,}:[A-Za-z0-9_\-]{30,}|(?:пароль|password|passwd|токен|token|api[ _-]?key|секрет)\s*[:=—-]\s*\S{4,})", re.I)

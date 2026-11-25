@@ -61,14 +61,23 @@ def memory() -> dict:
     return {}
 
 
+BATTERY_TTL = 60.0  # секунд: termux-battery-status — отдельная программа (до 5 с), а пульт спрашивает самочувствие часто
+_battery: tuple[float, dict | None] | None = None
+
+
 def battery() -> dict | None:
+    global _battery
     if os.environ.get("TERMUX_VERSION") and shutil.which("termux-battery-status"):
+        if _battery is not None and time.monotonic() - _battery[0] < BATTERY_TTL:
+            return _battery[1]
         try:
             out = subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=5).stdout
             d = json.loads(out)
-            return {"percent": d.get("percentage"), "charging": d.get("status") in ("CHARGING", "FULL"), "temp_c": d.get("temperature")}
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return None
+            value = {"percent": d.get("percentage"), "charging": d.get("status") in ("CHARGING", "FULL"), "temp_c": d.get("temperature")}
+        except (OSError, ValueError, subprocess.TimeoutExpired, AttributeError):
+            value = None
+        _battery = (time.monotonic(), value)
+        return value
     for base in Path("/sys/class/power_supply").glob("BAT*") if Path("/sys/class/power_supply").exists() else []:
         cap = _read(str(base / "capacity")).strip()
         st = _read(str(base / "status")).strip()

@@ -8,12 +8,15 @@
 - Одобрения Предохранителя и вопросы агента — кнопками. Напоминания, тревоги и итоги задач сердца —
   сообщениями (выключается).
 - Команды: /stop — прервать работу агента, /estop — стоп-кран (блокирует всё до /resume), /resume — снять стоп, /status — самочувствие, /new — новая страница, /help.
-- Фото/файлы и голос ограничены настройками; правки и команды остаются служебными фактами.
+- Фото/файлы и голос ограничены настройками; команды и кнопки — служебные факты, правки — было → стало.
+- Пересланное — с источником и исходной датой, пачкой (telegram_forward.py); всегда недоверенное и не команда.
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
+import contextlib
 import html as htmlmod
 import re
 import secrets as pysecrets
@@ -29,16 +32,19 @@ LIMIT = 4000
 CODE_TTL = 15 * 60
 STRANGER_REPLY_EVERY = 3600
 RICH_MEDIA_MAX = 10  # сколько картинок/файлов Rich-поста скачивать за раз
+SLOW_ANSWER = 8.0     # дольше до первого слова модели — строка о медленном ответе в журнал
 ORDER_WAIT = 30.0     # сколько сообщение чата ждёт обработки предыдущего, прежде чем пойти само
 ANSWER_RETRY = (5.0, 10.0, 20.0)  # повторы ответа после сетевого сбоя
 PAUSE_NOTICE = 30.0   # с какой паузы Telegram за частые сообщения показывать её в пульте и журнале
 LATE = 60.0           # опоздание сообщения, о котором чёрный ящик пишет в журнал
 NET_RETRY_MAX = 30.0  # самая долгая пауза между попытками связаться после сбоя сети (кроме неверного токена)
 POLL_GAP = 70.0       # опрос держится до 50 с; дольше без ответа — значит, сообщения не забирались
-URGENT = {'stop', 'стоп', 'estop', 'resume', 'продолжить', 'status', 'help', 'start', 'whoami'}  # вне очереди чата
+FORWARD_BATCH_MAX = 50  # пачка пересланного: Telegram пересылает до 100 разом; больше — следующей пачкой
+COMMENT_WINDOW = 1.5   # комментарий хозяина пришёл не раньше стольких секунд до пересланного — это подпись к нему
+URGENT = {'stop', 'стоп', 'estop', 'resume', 'продолжить', 'status', 'help', 'start', 'whoami', 'delivery', 'mode', 'режим'}  # вне очереди чата
 
 HELP = ("Я — Бендер. Пиши как обычно — отвечу.\n"
-        "/stop — прервать работу агента\n/estop — стоп-кран: остановить всё и не давать действовать до /resume\n/resume — снять стоп\n/status — как я себя чувствую\n/new — новая страница разговора (память остаётся)\n/убрать-навык имя — убрать навык из активных\n/help — это сообщение")
+        "/stop — прервать работу агента\n/delivery — сообщение во время работы: вставить в ход, прервать или после хода\n/estop — стоп-кран: остановить всё и не давать действовать до /resume\n/resume — снять стоп\n/status — как я себя чувствую\n/new — новая страница разговора (память остаётся)\n/убрать-навык имя — убрать навык из активных\n/help — это сообщение")
 
 
 def md_to_html(text: str) -> str:
@@ -96,6 +102,15 @@ class TelegramError(HumanError):
     pass
 
 
+class SendLock:
+    """Замок одного места чата (чат, тема): чья задача сейчас отправляет логическое сообщение."""
+    __slots__ = ('lock', 'owner')
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.owner = None
+
+
 class Telegram:
     name = "telegram"
 
@@ -113,9 +128,11 @@ class Telegram:
         self._cards: dict[str, tuple[int, int]] = {}   # карточка одобрения/вопроса → (чат, сообщение)
         self._listening = False
         self._bg: set[asyncio.Task] = set()
-        self._reply_to: dict[object, int | None] = {}
         self._live = {}
-        self._live_next = {}
+        self._live_next = {}         # (чат, тема) → когда можно следующий черновик или правку статуса
+        self._draft_holder = {}      # (чат, тема) → Live, чей черновик сейчас открыт: у Telegram одно место черновика
+        self._send_locks = {}        # (чат, тема) → SendLock: куски одного ответа идут подряд, без кусков соседа
+        self._status_messages = {}   # (чат, сообщение) → (агент, разговор): статус хода, маршрут без текста (в памяти)
         self._sent_at = {}  # чат → когда бот последний раз прислал туда обычное сообщение (оно закрывает черновик)
         self._retry_until = {}
         self._lanes = {}             # очередь чата → последняя задача обработки
@@ -126,10 +143,16 @@ class Telegram:
         self._draft_supported = None
         self._capabilities = {}
         self._albums = {}
+        self._recent = {}            # (чат, тема) → последнее простое сообщение хозяина: комментарий к пересланному следом
+        self._arrived = {}           # (чат, тема) → когда пришло последнее слово хозяина (отклик по этапам, Live)
+        self.timing = collections.deque(maxlen=20)  # отклик последних ответов: где ждали
+        self._flushing = {}          # (чат, тема) → пачки, которые уже разбираются после тишины
         self._commands = None
         self._profile = None
         self._groups = None
         self._topics = None
+        from .telegram_refs import migrate_host
+        migrate_host(app.store)  # таблицы учёта сообщений — на старте, вместе с прочими миграциями
 
     @property
     def topics(self):
@@ -277,65 +300,153 @@ class Telegram:
     def unsupported(error):
         return error.data.get('code')==404 or any(s in error.title.lower() for s in ('method not found','unknown method','method is not available'))
 
+    @staticmethod
+    def slot(chat):
+        """(чат, тема) — одно место черновика и одна очередь отправки. Адрес темы — int с .thread."""
+        try:return (int(chat),getattr(chat,'thread',None))
+        except (TypeError,ValueError):return None
+
+    @contextlib.asynccontextmanager
+    async def sending(self, chat):
+        """Одна логическая отправка (все куски длинного ответа, файл и карточка, статус хода) идёт подряд: куски
+        соседа по стае не вклиниваются. Та же задача входит повторно без ожидания. Модель под замком не зовётся;
+        долгую паузу Telegram (429) ждут без замка — соседи всё равно ждут ту же паузу чата."""
+        slot=self.slot(chat)
+        if slot is None:
+            yield
+            return
+        entry=self._send_locks.get(slot)
+        if entry is None:entry=self._send_locks[slot]=SendLock()
+        task=asyncio.current_task()
+        if entry.owner is task:
+            yield
+            return
+        await entry.lock.acquire()
+        entry.owner=task
+        try:
+            yield
+        finally:
+            if entry.owner is task:
+                entry.owner=None
+                entry.lock.release()
+
+    async def _pause_wait(self, chat, delay):
+        if delay<=0:return
+        entry=self._send_locks.get(self.slot(chat));task=asyncio.current_task()
+        if entry is None or entry.owner is not task or delay<PAUSE_NOTICE:
+            await asyncio.sleep(delay)
+            return
+        entry.owner=None;entry.lock.release()
+        try:await asyncio.sleep(delay)
+        finally:
+            await entry.lock.acquire();entry.owner=task
+
+    @staticmethod
+    def _reply(reply_to, quote=None):
+        params={'message_id':reply_to,'allow_sending_without_reply':True}
+        if quote:params['quote']=quote
+        return params
+
+    def _quote_refused(self, error, payload):
+        """Telegram не нашёл фрагмент цитаты в сообщении: повторить без фрагмента (ответ всё равно цитатой на сообщение)."""
+        params=payload.get('reply_parameters')
+        if not isinstance(params,dict) or not params.get('quote') or error.data.get('code')!=400 or 'quote' not in error.title.lower():return False
+        params.pop('quote',None)
+        self.app.journal.write('channel','Telegram не принял фрагмент цитаты — ответ отправлен без фрагмента',actor='telegram',data={'error':error.title[:200]})
+        return True
+
+    def _wake_drafts(self, chat, skip=None):
+        """Обычное сообщение бота закрывает черновик в этом месте чата: открытый черновик уйдёт снова. Статус-сообщения
+        не трогаем — их правка тем же текстом Telegram всё равно отклонит."""
+        slot=self.slot(chat)
+        for live in list(self._live.values()):
+            if live is not skip and not live.closed and not live.fallback and self.slot(live.chat)==slot:
+                live.version+=1;live.wake.set()
+
+    def mark(self, ctx):
+        """«🦊» — знак агента без двоеточия: подпись голосового и продолжения длинного ответа; '' — подпись выключена."""
+        head=self.badge(ctx)
+        return head[:-2] if head.endswith(': ') else head.strip()
+
     async def rich_request(self,payload):
-        chat=payload['chat_id']
-        for attempt in range(4):
+        chat=payload['chat_id'];attempt=0
+        while True:
             delay=self._retry_until.get(chat,0)-time.monotonic()
-            if delay>0:await asyncio.sleep(delay)
+            if delay>0:await self._pause_wait(chat,delay)
             try:return await self.api('sendRichMessage',payload)
             except TelegramError as error:
-                if error.data.get('code')!=429 or attempt==3:raise
+                if self._quote_refused(error,payload):continue
+                if error.data.get('code')!=429 or attempt>=3:raise
+                attempt+=1
                 try:delay=max(1,min(86400,float(error.data.get('retry_after') or 1)))
                 except (TypeError,ValueError):delay=1
                 self.pause(chat,delay)
 
-    async def send(self, chat_id: int, text: str, *, buttons=None, reply_to=None):
+    async def send(self, chat_id: int, text: str, *, buttons=None, reply_to=None, quote=None, ids=None, agent=None):
+        """Отправить (Rich, иначе HTML кусками). Возвращает номер последнего сообщения; ids — список, в который
+        дописываются номера всех кусков (маршрут у каждого). agent — чьё сообщение: при подписи агентов знак стоит
+        и на продолжениях («🦊 (2/3)»). quote — точный фрагмент сообщения reply_to; не принят — ответ без фрагмента."""
         from .telegram_events import capture
         capture(chat_id,text)
+        async with self.sending(chat_id):
+            return await self._send(chat_id,text,buttons=buttons,reply_to=reply_to,quote=quote,ids=ids,agent=agent)
+
+    async def _send(self, chat_id, text, *, buttons=None, reply_to=None, quote=None, ids=None, agent=None):
         from .telegram_rich import parts,RichFormatError
         if not self.settings().get('rich',True) or self.capability('sendRichMessage') is False:
-            return await self.send_plain(chat_id,text,buttons=buttons,reply_to=reply_to)
+            return await self._send_plain(chat_id,text,buttons=buttons,reply_to=reply_to,quote=quote,ids=ids,agent=agent)
         try:prepared=parts(text)
         except RichFormatError:
-            return await self.send_plain(chat_id,text,buttons=buttons,reply_to=reply_to)
-        last=None
+            return await self._send_plain(chat_id,text,buttons=buttons,reply_to=reply_to,quote=quote,ids=ids,agent=agent)
+        last=None;mark=self.mark(agent) if agent is not None else ''
         for n,(original,markdown) in enumerate(prepared):
+            if n and mark:markdown=mark+' ('+str(n+1)+'/'+str(len(prepared))+')\n\n'+markdown
             payload={'chat_id':chat_id,'rich_message':{'markdown':markdown,'skip_entity_detection':True}}
-            if n==0 and reply_to:payload['reply_parameters']={'message_id':reply_to,'allow_sending_without_reply':True}
+            if n==0 and reply_to:payload['reply_parameters']=self._reply(reply_to,quote)
             if n==len(prepared)-1 and buttons:payload['reply_markup']={'inline_keyboard':buttons}
             try:
                 result=await self.rich_request(payload)
                 self.set_capability('sendRichMessage',True)
                 last=(result or {}).get('message_id')
+                if ids is not None and isinstance(last,int) and not isinstance(last,bool):ids.append(last)
             except TelegramError as error:
                 if error.data.get('code')==429:raise
                 if self.unsupported(error):self.set_capability('sendRichMessage',False)
                 elif error.data.get('code') not in (400,403):raise
                 # Не повторяем уже доставленные части; исходный markdown остаётся для HTML-пути.
                 rest=''.join(source for source,_ in prepared[n:])
-                return await self.send_plain(chat_id,rest,buttons=buttons,reply_to=reply_to if n==0 else None)
-        for live in self._live.values():
-            if live.chat==chat_id and not live.closed:live.version+=1;live.wake.set()
+                return await self._send_plain(chat_id,rest,buttons=buttons,reply_to=reply_to if n==0 else None,quote=quote if n==0 else None,ids=ids,agent=agent,offset=n)
+        self._wake_drafts(chat_id)
         return last
 
-    async def send_plain(self, chat_id: int, text: str, *, buttons: list[list[dict]] | None = None, reply_to: int | None = None) -> int | None:
+    async def send_plain(self, chat_id: int, text: str, *, buttons: list[list[dict]] | None = None, reply_to: int | None = None, quote=None, ids=None, agent=None) -> int | None:
         """Отправить (кусками, с разметкой; не разобралась разметка — простым текстом). Возвращает id последнего сообщения."""
+        async with self.sending(chat_id):
+            return await self._send_plain(chat_id,text,buttons=buttons,reply_to=reply_to,quote=quote,ids=ids,agent=agent)
+
+    async def _send_plain(self, chat_id, text, *, buttons=None, reply_to=None, quote=None, ids=None, agent=None, offset=0):
         last = None
         chunks = split(text)
+        mark = self.mark(agent) if agent is not None else ''
         for i, chunk in enumerate(chunks):
+            n = offset + i
+            if n and mark: chunk = mark + ' (' + str(n + 1) + '/' + str(offset + len(chunks)) + ')\n' + chunk
             payload: dict = {"chat_id": chat_id, "text": md_to_html(chunk), "parse_mode": "HTML", "disable_web_page_preview": True}
             if reply_to and i == 0:
-                payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+                payload["reply_parameters"] = self._reply(reply_to, quote)
             if buttons and i == len(chunks) - 1:
                 payload["reply_markup"] = {"inline_keyboard": buttons}
-            for attempt in range(4):
+            attempt = 0
+            while True:
                 delay = self._retry_until.get(chat_id, 0) - time.monotonic()
-                if delay > 0: await asyncio.sleep(delay)
+                if delay > 0: await self._pause_wait(chat_id, delay)
                 try:
                     res = await self.api("sendMessage", payload)
                     break
                 except TelegramError as e:
+                    if self._quote_refused(e, payload): continue
                     if e.data.get('code') == 429 and attempt < 3:
+                        attempt += 1
                         try: delay = max(1, min(86400, float(e.data.get('retry_after') or 1)))
                         except (ValueError, TypeError): delay = 1
                         self.pause(chat_id, delay)
@@ -343,12 +454,13 @@ class Telegram:
                     if 'parse_mode' in payload and e.code == 'tg_api' and any(s in e.title.lower() for s in ('parse', 'entit')):
                         payload.pop('parse_mode')
                         payload['text'] = chunk
-                        if attempt < 3: continue
+                        if attempt < 3:
+                            attempt += 1
+                            continue
                     raise
             last = (res or {}).get("message_id") if isinstance(res, dict) else None
-            for live in self._live.values():
-                if live.chat == chat_id and not live.closed:
-                    live.version += 1; live.wake.set()
+            if ids is not None and isinstance(last, int) and not isinstance(last, bool): ids.append(last)
+        self._wake_drafts(chat_id)
         return last
 
     def _task_done(self, task):
@@ -399,7 +511,11 @@ class Telegram:
         for live in lives:
             live.task.cancel()
         if lives: await asyncio.gather(*(live.task for live in lives), return_exceptions=True)
+        self._draft_holder.clear()
+        self._status_messages.clear()
         self._albums.clear()
+        self._recent.clear()
+        self._flushing.clear()
         self._lanes.clear()
         pending = list(self._bg)
         for t in pending: t.cancel()
@@ -515,7 +631,10 @@ class Telegram:
 
     def _lateness(self, updates, previous) -> None:
         """Сообщение пришло намного позже, чем его отправили: пишем в журнал, где оно ждало."""
-        dates = [body['date'] for u in updates or [] for body in [u.get('message') or u.get('edited_message') or {}] if isinstance(body.get('date'), (int, float))]
+        # У правки дата отправки — давняя; опоздание считается от времени правки (edit_date).
+        dates = [stamp for u in updates or [] for stamp in [(u.get('message') or {}).get('date') if u.get('message') else
+                 (u.get('edited_message') or {}).get('edit_date') or (u.get('edited_message') or {}).get('date')]
+                 if isinstance(stamp, (int, float)) and not isinstance(stamp, bool)]
         if not dates:
             return
         now = self.polled_at or time.time()
@@ -542,10 +661,12 @@ class Telegram:
         self.app.journal.write('channel', f'Telegram: сообщение пришло через {int(late)} с после отправки — ' + text, actor='telegram',
                                data={'late': int(late), 'poll_gap': int(now - previous) if previous else None, 'count': len(dates)})
 
-    async def _seen(self, chat_id, message_id) -> None:
-        """👀 на сообщении, которое встало в идущий ход: хозяин видит, что бот его получил."""
+    SEEN = {'insert': '👀', 'queue': '✍', 'interrupt': '⚡'}  # вставлю в ход · после хода · прервал ход ради этого
+
+    async def _seen(self, chat_id, message_id, how='insert') -> None:
+        """Реакция на сообщении, пришедшем во время хода: хозяин видит, что бот его получил и как доставит."""
         try:
-            await self.api('setMessageReaction', {'chat_id': int(chat_id), 'message_id': message_id, 'reaction': [{'type': 'emoji', 'emoji': '👀'}]}, timeout=10)
+            await self.api('setMessageReaction', {'chat_id': int(chat_id), 'message_id': message_id, 'reaction': [{'type': 'emoji', 'emoji': self.SEEN.get(how, '👀')}]}, timeout=10)
         except TelegramError:
             pass
 
@@ -569,7 +690,7 @@ class Telegram:
         if 'stopped_message_generation' in u:return None
         if 'callback_query' in u:
             cq=u['callback_query'] or {};message=cq.get('message') or {}
-            if str(cq.get('data') or '').startswith(('ap:','q:')):return None
+            if str(cq.get('data') or '').startswith(('ap:','q:','nm:')):return None
             return ('button',(message.get('chat') or {}).get('id'))
         body=u.get('message') or u.get('edited_message') or u.get('message_reaction') or u.get('my_chat_member') or {}
         word=str(body.get('text') or '')[1:].split(maxsplit=1) if str(body.get('text') or '').startswith('/') else []
@@ -594,21 +715,109 @@ class Telegram:
         except Exception as e:  # noqa: BLE001 — одно кривое сообщение не останавливает канал
             self.app.journal.write("channel", f"Telegram: не обработалось сообщение: {e}"[:300], actor="telegram")
 
-    def _collect_album(self, msg):
-        key=((msg.get('chat') or {}).get('id'),msg.get('message_thread_id'),msg['media_group_id'])
+    def _batch_wait(self, msg):
+        """Собирать ли сообщение в пачку: (вид, сколько ждать тишины) или None. Альбом — всегда 0,8 с;
+        пересланное — настройкой forward_batch_ms (пересланный альбом входит в ту же пачку)."""
+        from .telegram_forward import forwarded
+        if forwarded(msg):
+            try:wait=int(self.settings().get('forward_batch_ms',800) or 0)
+            except (TypeError,ValueError):wait=800
+            if wait>0:return ('fwd',),min(wait,5000)/1000
+        if msg.get('media_group_id'):return ('album',msg['media_group_id']),.8
+        return None
+
+    def _collect(self, msg, kind, wait):
+        """Конец альбома и пачки пересланного API не отмечает: ждём тишины после последнего сообщения."""
+        key=(int((msg.get('chat') or {}).get('id')),msg.get('message_thread_id'))+kind
+        limit=FORWARD_BATCH_MAX if kind[0]=='fwd' else 10
         old=self._albums.get(key)
+        if old and len(old[0])>=limit:old=None  # полная пачка уже уходит; следующее сообщение начинает новую
         messages=old[0] if old else []
         if old:old[1].cancel()
-        if len(messages)<10:messages.append(msg)
+        if len(messages)<limit:messages.append({**msg,'_arrived':time.monotonic()})
+        delay=0 if len(messages)>=limit else wait
         async def flush():
-            await asyncio.sleep(.8)  # Конец альбома API не отмечает; ждём тишины после события.
-            self._albums.pop(key,None)
-            combined={**messages[0],'_album_messages':list(messages)}
-            combined.pop('media_group_id',None)
-            await self._handle({'message':combined})
+            await asyncio.sleep(delay)
+            if (self._albums.get(key) or (None,))[0] is messages:self._albums.pop(key,None)
+            # Тишина дождались, пачка разбирается (скачивание, расшифровка): следующее сообщение чата её подождёт.
+            running=self._flushing.setdefault(key[:2],set());running.add(task)
+            try:await self._handle({'message':self._combined(messages)})
+            finally:
+                running.discard(task)
+                if not running and self._flushing.get(key[:2]) is running:self._flushing.pop(key[:2],None)
         task=asyncio.create_task(flush())
         self._albums[key]=(messages,task)
         self._bg.add(task);task.add_done_callback(self._task_done)
+
+    @staticmethod
+    def _combined(messages):
+        combined={**messages[0],'_album_messages':list(messages)}
+        combined.pop('media_group_id',None)
+        return combined
+
+    async def _flush_pending(self, lane):
+        """Следующее сообщение того же чата не обгоняет собираемую пачку: она уходит сразу, без ожидания тишины,
+        а уже разбираемую (тишина дождалась, идёт скачивание) оно ждёт, как обычное сообщение ждёт предыдущее."""
+        running=[task for task in self._flushing.get(lane,()) if not task.done()]
+        if running:await asyncio.wait(running,timeout=ORDER_WAIT)
+        for key,(messages,task) in list(self._albums.items()):
+            if key[:2]!=lane or (self._albums.get(key) or (None,))[0] is not messages:continue
+            task.cancel();self._albums.pop(key,None)
+            await self._handle({'message':self._combined(messages)})
+
+    def _still_working(self, comment):
+        """Комментарий ещё в работе — ждёт в очереди хода или его ход идёт; на уже отвеченный пересланное не ссылается."""
+        try:ctx=self.app.agents.get(comment['agent'])
+        except HumanError:return False
+        return ctx.mind.running(comment['sid'])
+
+    def _join_comment(self, comment, chat, text, attachments, forward, ids, items):
+        """Комментарий хозяина (Telegram присылает его раньше пересланного) ещё ждёт в очереди идущего хода —
+        модель его не видела: пачка дописывается в ту же запись. Иначе — False, пачка идёт обычным сообщением."""
+        try:ctx=self.app.agents.get(comment['agent'])
+        except HumanError:return False
+        from . import media
+        def match(msg,meta):return meta.get('telegram_message_id')==comment['mid'] and meta.get('telegram_chat_id')==int(chat)
+        def change(msg,meta):
+            parts=media.content(text,attachments,vision=ctx.settings.get('attachments','vision',True),audio=False) if attachments else [{'type':'text','text':text}]
+            value=msg.get('content')
+            if isinstance(value,list):
+                first=next((n for n,p in enumerate(value) if isinstance(p,dict) and p.get('type')=='text'),None)
+                if first is None:return None
+                value=list(value);value[first]={**value[first],'text':str(value[first].get('text') or '')+'\n\n'+parts[0]['text']}
+                value+=parts[1:]
+            elif len(parts)>1:value=[{'type':'text','text':str(value or '')+'\n\n'+parts[0]['text']},*parts[1:]]
+            else:value=str(value or '')+'\n\n'+parts[0]['text']
+            meta={**meta,'untrusted':True,'forwarded':True,'forward':forward,'attachments':list(meta.get('attachments') or [])+list(attachments),
+                  'telegram_message_ids':[comment['mid'],*ids]}
+            return {**msg,'content':value},meta
+        if not ctx.mind.amend_queued(comment['sid'],match,change):return False
+        self.remember(ctx,chat,ids,comment['sid'],text,'in',tainted=True,foreign=True,items=items)
+        return True
+
+    async def _transcribe(self, ctx, chat, sid, m, attachments, *, tainted, wrap=True):
+        """Голосовое m → (текст, вложения, нативный ли звук). Пересланное (wrap=False) уже внутри рамки пересланного."""
+        info=m["voice"]
+        ctx.voice.require("stt")
+        from ..tools.registry import ToolContext
+        await ToolContext(ctx,actor="owner").check("audio.transcribe","Telegram","загрузить голосовое сообщение хозяина")
+        from pathlib import Path
+        old=next((i for i in attachments if i['kind']=='voice' and i.get('_message',m.get('message_id'))==m.get('message_id')),None)
+        if old is None:raise HumanError('telegram_voice','Голосовое не скачалось','Пришли его ещё раз.')
+        audio=Path(old['path']).read_bytes()
+        from ..voice.input import prepare,attachment,transcript_text
+        result=await prepare(ctx,audio,ext='ogg',seconds=info.get('duration',0),session=sid,from_owner=not tainted)
+        text=transcript_text(result,seconds=info.get('duration',0),from_owner=not tainted,wrap=wrap)
+        if m.get('caption'):text+='\n\nПодпись к голосовому: '+str(m['caption'])
+        native=bool(result['native'])
+        if native:
+            item=await attachment(ctx,result,session=sid,existing=old,source='telegram')
+            attachments=[item if a is old else a for a in attachments]
+        if result.get('notice'):
+            notice=self.signed(ctx,result['notice']);ids=[]
+            await self.send(chat,notice,ids=ids,agent=ctx)
+            self.remember(ctx,chat,ids,sid,notice,'out')
+        return text,attachments,native
 
     async def _media_notice(self,ctx,chat,sid,text):
         from ..tools.registry import ToolContext
@@ -616,7 +825,9 @@ class Telegram:
         try:
             await ToolContext(ctx,actor='owner',session_id=sid).check('msg.send','telegram:owner' if chat==private else 'telegram:group:'+str(chat),
                 'объяснить обработку присланного вложения',to_owner=chat==private)
-            await self.send(chat,text)
+            text=self.signed(ctx,text);ids=[]
+            mid=await self.send(chat,text,ids=ids,agent=ctx)
+            self.remember(ctx,chat,ids or mid,sid,text,'out')  # ответ цитатой на уведомление — тому агенту, чьё вложение
         except HumanError as error:ctx.journal.write('channel','Telegram: уведомление о вложении не отправлено',data={'code':error.code})
 
     async def _download(self, ctx, sid, kind, info):
@@ -644,8 +855,9 @@ class Telegram:
         from .telegram_rich_in import media as rich_media
         from .video_in import KINDS as VISUAL
         files=[]
-        async def download(kind,info):
+        async def download(kind,info,message=None):
             item=await self._download(ctx,sid,kind,info)
+            item['_message']=message  # чьё вложение — для пачки с несколькими голосовыми; убирается при разборе
             if kind in VISUAL:  # для кадров/обложки/подписи стикера; убирается при разборе
                 item['_tg']={key:info.get(key) for key in ('duration','emoji','set_name','is_animated','is_video','thumbnail') if info.get(key)}
             return item
@@ -656,7 +868,7 @@ class Telegram:
                 if kind=='document' and msg.get('animation'):continue  # Bot API дублирует гифку в document — качаем один раз
                 media.require(ctx)
                 if isinstance(info,list):info=info[-1]
-                files.append(await download(kind,info))
+                files.append(await download(kind,info,msg.get('message_id')))
             # Медиа Rich-поста — по возможности: текст поста важнее, поэтому лишнее и тяжёлое пропускаем с пометкой, а не отказываем.
             skipped=0;enabled=ctx.settings.get('attachments','enabled',True)
             for kind,info in rich_media(msg.get('rich_message')):
@@ -679,22 +891,30 @@ class Telegram:
             raise HumanError('telegram_album_size','Альбом больше 20 МБ суммарно','Пришли файлы отдельными сообщениями.')
         return files
 
-    def remember(self, ctx, chat, message, sid, text, direction,*,source_text=None,tainted=False,command=False,foreign=False):
-        """foreign — сам текст не слова хозяина (пересланное); tainted — ход или сообщение несли чужое."""
-        if not isinstance(message,int):return
-        refs=ctx.store.meta_get('telegram:refs',{})
-        refs[str(chat)+':'+str(message)]={'session':sid,'text':text[:4000],'direction':direction,'thread':getattr(chat,'thread',None),'tainted':bool(tainted),'foreign':bool(foreign)}
+    def remember(self, ctx, chat, message, sid, text, direction,*,source_text=None,tainted=False,command=False,foreign=False,items=None,answer=False):
+        """foreign — сам текст не слова хозяина (пересланное); tainted — ход или сообщение несли чужое.
+        message — номер или список номеров (куски одного ответа, альбом, пачка): маршрут один, одна транзакция.
+        items — {номер: {'source_text', 'media'}}: у сообщения альбома/пачки своя подпись и отпечаток вложения (для правок).
+        answer — ответ на вопрос агента: запоминается, чтобы правку ответа было видно.
+        Строка на сообщение (telegram_refs.py), без переписи общего JSON."""
+        from . import telegram_refs
+        from .telegram_events import digest
+        if not isinstance(message,(int,list,tuple)):return
+        data={'session':sid,'text':text[:4000],'direction':direction,'thread':getattr(chat,'thread',None),'tainted':bool(tainted),'foreign':bool(foreign)}
         if source_text is not None:
-            from .telegram_events import digest
-            refs[str(chat)+':'+str(message)].update(source_text=source_text[:4096],source_hash=digest(source_text))
-        if command:refs[str(chat)+':'+str(message)]['command']=True
-        ctx.store.meta_set('telegram:refs',dict(list(refs.items())[-2000:]))
-        routes=self.app.store.meta_get('telegram:message_routes',{})
-        routes[str(chat)+':'+str(message)]={'agent':ctx.agent_id,'session':sid}
-        self.app.store.meta_set('telegram:message_routes',dict(list(routes.items())[-2000:]))
+            data.update(source_text=source_text[:4096],source_hash=digest(source_text))
+        if command:data['command']=True
+        if answer:data['answer']=True
+        per={}
+        for mid,item in (items or {}).items():
+            own={'media':item['media']} if isinstance(item.get('media'),list) else {}
+            if isinstance(item.get('source_text'),str):own.update(source_text=item['source_text'][:4096],source_hash=digest(item['source_text']))
+            per[mid]=own
+        telegram_refs.remember(self.app,ctx,chat,message,data,per)
 
     def require_ref(self, ctx, chat, message, sid):
-        ref=ctx.store.meta_get('telegram:refs',{}).get(str(chat)+':'+str(message))
+        from .telegram_refs import ref as known
+        ref=known(ctx,chat,message)
         if not ref or ref['session']!=sid:
             raise HumanError('telegram_ref','Номер сообщения не найден в этом разговоре','Возьми [#номер] из его истории, не из чужого чата.')
         return ref
@@ -705,10 +925,11 @@ class Telegram:
         if not self.settings().get('reactions',True) or (event.get('user') or {}).get('id')!=owner.get('user_id'):return
         chat=(event.get('chat') or {}).get('id');mid=event.get('message_id')
         if chat!=(owner.get('chat_id') or owner.get('user_id')) and not self.groups.allowed(chat):return
-        route=self.app.store.meta_get('telegram:message_routes',{}).get(str(chat)+':'+str(mid),{})
+        from . import telegram_refs
+        route=telegram_refs.route(self.app,chat,mid) or {}
         try:ctx=self.app.agents.get(route.get('agent','main'))
         except HumanError:return
-        ref=ctx.store.meta_get('telegram:refs',{}).get(str(chat)+':'+str(mid))
+        ref=telegram_refs.ref(ctx,chat,mid)
         if not ref:return
         old=[r.get('emoji') for r in event.get('old_reaction',[]) if r.get('type')=='emoji' and r.get('emoji') in EMOJI]
         new=[r.get('emoji') for r in event.get('new_reaction',[]) if r.get('type')=='emoji' and r.get('emoji') in EMOJI]
@@ -784,18 +1005,39 @@ class Telegram:
             if address is None:return
             chat={**chat,'id':address}
             msg={**msg,'chat':chat}
-        if msg.get('media_group_id'):
-            self._collect_album(msg)
-            return
+        from . import telegram_forward
+        lane=(int(chat['id']),msg.get('message_thread_id'))
+        arrived=msg.get('_arrived') or time.monotonic()
+        self._arrived[lane]=arrived
+        if len(self._arrived)>200:self._arrived.pop(next(iter(self._arrived)))
+        if not msg.get('_album_messages'):
+            batch=self._batch_wait(msg)
+            if batch:
+                self._collect(msg,*batch)
+                return
+            await self._flush_pending(lane)  # собранная пачка этого чата уходит раньше следующего сообщения
+            self._recent.pop(lane,None)  # комментарием к пересланному станет только простой текст прямо перед ним, не команда
+        from .telegram_routes import fallback_notice,route_reply
+        try:ctx,sid,refused=*self.selected(chat['id']),None
+        except HumanError as error:ctx,sid,refused=None,None,error  # закрытая тема: действующий адресат цитаты всё равно получит ответ
         try:
-            ctx,sid=self.selected(chat['id'])
-            from .telegram_routes import replied
-            ctx,sid=replied(self,chat['id'],msg,ctx,sid)  # ответ на вопрос/сообщение соседа по стае — ему, а не выбранному агенту
+            # ответ цитатой на сообщение соседа по стае — ему, а не выбранному агенту; выбор не меняется
+            ctx,sid,routing=route_reply(self,chat['id'],msg,ctx,sid)
+            if ctx is None:raise refused
         except HumanError as error:
             await self.send(chat['id'],error.title+'. '+error.hint)
             return
+        notice=fallback_notice(self,routing)
+        if notice:await self.send(chat['id'],notice)
         messages=msg.get('_album_messages') or [msg]
-        if len(messages)>1:text='\n'.join(body(m) for m in messages).strip()
+        origins=[telegram_forward.origin(m,owner.get('user_id'),(self.me or {}).get('id')) for m in messages]
+        forwarded=any(origins)
+        texts=[body(m) for m in messages]
+        if len(messages)>1:text='\n'.join(texts).strip()
+        notes=[]  # дописанное к тексту при разборе вложений: у пересланного — внутри той же рамки
+        def note(piece):
+            nonlocal text
+            text+=('\n\n' if text else '')+piece;notes.append(piece)
         try:attachments=await self.receive_media(ctx,messages,sid)
         except (HumanError,NetError,ValueError) as exc:
             await self.send(chat['id'],str(exc))
@@ -803,8 +1045,7 @@ class Telegram:
         for item in messages:
             if item.get('_rich_skipped'):
                 count,enabled=item['_rich_skipped']
-                text+=('\n\n' if text else '')+f'[Медиа из поста не скачано: {count}. '+('Вложения выключены в настройках.]' if not enabled else f'Беру не больше {RICH_MEDIA_MAX} файлов и 20 МБ за сообщение.]')
-        forwarded = any(msg.get(k) for k in ("forward_origin", "forward_from", "forward_from_chat", "forward_sender_name", "forward_date"))
+                note(f'[Медиа из поста не скачано: {count}. '+('Вложения выключены в настройках.]' if not enabled else f'Беру не больше {RICH_MEDIA_MAX} файлов и 20 МБ за сообщение.]'))
         tainted = forwarded or bool(msg.get("external_reply"))
         if not tainted and text.split('@',1)[0].strip()=='/avatar' and attachments:
             from ..tools.registry import ToolContext
@@ -819,30 +1060,19 @@ class Telegram:
             self.remember(ctx,chat['id'],msg.get('message_id'),sid,'/avatar','in',source_text='/avatar',command=True)
             return
         if any(item['kind']!='voice' for item in attachments):tainted=True
-        if msg.get("voice"):
-            try:
-                info=msg["voice"]
-                ctx.voice.require("stt")
-                from ..tools.registry import ToolContext
-                from ..core.pathutil import relative_path
-                await ToolContext(ctx,actor="owner").check("audio.transcribe","Telegram","загрузить голосовое сообщение хозяина")
-                from pathlib import Path
-                audio=Path(next(i['path'] for i in attachments if i['kind']=='voice')).read_bytes()
-                from ..voice.input import prepare,attachment,transcript_text
-                result=await prepare(ctx,audio,ext='ogg',seconds=info.get('duration',0),session=sid,from_owner=not tainted)
-                text=transcript_text(result,seconds=info.get('duration',0),from_owner=not tainted)
-                if msg.get('caption'):text+='\n\nПодпись к голосовому: '+str(msg['caption'])
-                if result['native']:
-                    old=next(item for item in attachments if item['kind']=='voice')
-                    native=await attachment(ctx,result,session=sid,existing=old,source='telegram')
-                    attachments=[native if item is old else item for item in attachments]
-                    tainted=True  # Сохранённый аудиофайл — внешние данные, в отличие от проверяемого текста хозяина.
-                if result.get('notice'):await self.send(chat['id'],result['notice'])
+        for n,item in enumerate(messages):
+            if not item.get('voice'):continue
+            try:said,attachments,native=await self._transcribe(ctx,chat['id'],sid,item,attachments,tainted=tainted,wrap=not forwarded)
             except (HumanError,NetError,ValueError) as exc:
+                if forwarded and len(messages)>1:
+                    texts[n]='[голосовое не расшифровано: '+str(exc)[:200]+']';continue  # остальная пачка доходит
                 from .media import describe
                 await self.send(chat["id"],str(exc)+'\n'+describe(attachments))
                 return
-        if attachments and not msg.get('voice'):
+            texts[n]=said
+            if len(messages)==1:text=said
+            if native:tainted=True  # Сохранённый аудиофайл — внешние данные, в отличие от проверяемого текста хозяина.
+        if attachments:
             from ..voice.files import format_of,prepare as audio_file
             from .video_in import KINDS as VISUAL,look
             processed=[]
@@ -850,26 +1080,32 @@ class Telegram:
                 if item['kind']=='audio' or item['kind']=='document' and format_of(item):
                     tainted=True
                     try:
-                        result=await audio_file(ctx,item,session=sid);item=result['item'];text+=('\n\n' if text else '')+result['text']
+                        result=await audio_file(ctx,item,session=sid);item=result['item'];note(result['text'])
                         if result['notice']:await self._media_notice(ctx,chat['id'],sid,result['notice'])
                     except (HumanError,NetError,ValueError) as error:
-                        text+=('\n\n' if text else '')+'[Аудиофайл не расшифрован: '+str(error)+']\nФайл: '+item['path']
+                        note('[Аудиофайл не расшифрован: '+str(error)+']\nФайл: '+item['path'])
                         await self._media_notice(ctx,chat['id'],sid,str(error)+'\nФайл: '+item['path'])
                 elif item['kind'] in VISUAL:
                     tainted=True
-                    seen=await look(self,ctx,item,sid);item=seen['item'];text+=('\n\n' if text else '')+seen['text']
+                    seen=await look(self,ctx,item,sid);item=seen['item'];note(seen['text'])
                     processed+=seen['extra']
                     if seen['notice']:await self._media_notice(ctx,chat['id'],sid,seen['notice'])
                 processed.append(item)
             attachments=processed
+        for item in attachments:item.pop('_message',None)
         if attachments and not text:text='Прислано вложение.'
-        if not text:
+        if not text and not forwarded:
             await self.send(chat["id"],"Пришли текст или голосовое сообщение; голос включается в пульте → Настройки → Голос.")
             return
         source_text=body(msg)
+        comment=None
         if forwarded:
-            from ..tools.web import untrusted
-            text=untrusted('пересланное сообщение Telegram',text)  # чужие слова целиком, вместе с расшифровкой голоса
+            # Одна рамка на пачку: автор и исходная дата — в строке источника, у пачки ещё и в каждой строке.
+            items=[{'origin':o,'text':t if m.get('voice') else telegram_forward.item_text(m,t),'id':m.get('message_id'),'date':m.get('date')}
+                   for m,o,t in zip(messages,origins,texts)]
+            recent=self._recent.get(lane)
+            if recent and 0<=arrived-recent['at']<=COMMENT_WINDOW and self._still_working(recent):comment=recent
+            text=telegram_forward.frame(items,extra='\n\n'.join(notes),comment=comment['mid'] if comment else None)
         cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
         if tainted or any(a['kind']!='voice' for a in attachments):
             cmd = ""  # пересланная речь/текст не является командой хозяина
@@ -887,40 +1123,83 @@ class Telegram:
             try:asker=self.app.agents.get(card.get('agent_id','main'))
             except HumanError:asker=ctx
             if self.app.answer(qid,text):
+                # Ответ тоже запоминается: его правку агент увидит.
+                self.remember(asker,chat['id'],msg.get('message_id'),card.get('session') or asker.main_session(),text,'in',source_text=source_text,answer=True)
                 asker.journal.write('channel','Telegram: хозяин ответил на вопрос цитатой',actor='owner',data={'question':qid})
-                await self.send(chat['id'],'→ Ответ передан'+('' if asker is ctx and asker.agent_id=='main' else ' «'+str(asker.selfdir.identity().get('name') or asker.agent_id)+'»')+'.')
+                sent=[];await self.send(chat['id'],'→ Ответ передан'+('' if asker is ctx and asker.agent_id=='main' else ' «'+str(asker.selfdir.identity().get('name') or asker.agent_id)+'»')+'.',ids=sent)
+                self._route_only(asker,chat['id'],sent,card.get('session'))
                 return
         # ход — в фоне: опрос не должен ждать конца хода (иначе кнопка одобрения не дойдёт, пока ход её ждёт)
         quote=msg.get('reply_to_message') or {}
         excerpt=msg.get('quote') or {};external=msg.get('external_reply') or {}
         if quote or excerpt or external:
             from ..mind.quotes import append
-            ref_key=str(chat['id'])+':'+str(quote.get('message_id'))
-            known=ctx.store.meta_get('telegram:refs',{}).get(ref_key) if quote else None
-            # Богатые сообщения бота Telegram цитирует без текста — берём его из памяти отправленного, в том числе у соседа по стае.
-            saved=known
-            if quote and not saved:
-                route=self.app.store.meta_get('telegram:message_routes',{}).get(ref_key) or {}
-                try:other=self.app.agents.get(route['agent']) if route.get('agent') else None
-                except HumanError:other=None
-                saved=other.store.meta_get('telegram:refs',{}).get(ref_key) if other else None
-                if saved:saved={**saved,'text':'['+str(other.selfdir.identity().get('name') or other.agent_id)+'] '+str(saved.get('source_text') or saved.get('text') or ''),'source_text':None}
-            quote_text=excerpt.get('text') or body(quote) or (saved or {}).get('source_text') or (saved or {}).get('text') or '[медиа; текст цитаты не передан]'
-            # Своё слово хозяина (не пересланное) и ответ бота из чистого хода — без обёртки; ход заражается как раньше.
-            # Своё сообщение агента (ответ, уведомление, вопрос) — его слова: они и так в истории, цитата хода не заражает.
-            # Чужим остаётся только то, что несёт чужой текст: пересланное, внешняя цитата, уведомление почты/вебхука/рефлекса (хозяин 19.11).
-            if external or not known:foreign=True
-            elif known.get('direction')=='in':foreign=bool(known.get('foreign',known.get('tainted')))
-            else:foreign=bool(known.get('foreign'))
-            text=append(text,quote_text,channel='Telegram',reference=quote.get('message_id') or external.get('message_id') or 'внешнее',trusted=not foreign)
-            if foreign:tainted=True
+            from . import telegram_refs
+            if external:
+                # Сообщение другого чата: его номер не из этого разговора, автор и чат — только в строке источника рамки.
+                where,word=telegram_forward.describe_external(external,owner_id=owner.get('user_id'),bot_id=(self.me or {}).get('id'))
+                quote_text=excerpt.get('text') or '['+(word+'; ' if word else '')+'текст сообщения из другого чата не передан]'
+                text=append(text,quote_text,channel='Telegram',reference='внешнее',label='из другого чата',source=where,trusted=False)
+                tainted=True
+            else:
+                mid=quote.get('message_id') if quote else None
+                known=telegram_refs.ref(ctx,chat['id'],mid) if quote else None
+                # Богатые сообщения бота Telegram цитирует без текста — берём его из памяти отправленного, в том числе у соседа по стае.
+                saved=known;neighbour=None
+                status=self._status_messages.get((int(chat['id']),mid)) if quote else None
+                if quote and not saved:
+                    route=telegram_refs.route(self.app,chat['id'],mid) or {}
+                    # Сосед в архиве или стая выключена — его сообщение всё равно известно: архив не делает его слова чужими.
+                    try:other=self.app.agents.get(route['agent'],archived=True) if route.get('agent') else None
+                    except HumanError:other=None
+                    neighbour=telegram_refs.ref(other,chat['id'],mid) if other else None
+                    if neighbour:saved={**neighbour,'text':'['+str(other.selfdir.identity().get('name') or other.agent_id)+'] '+str(neighbour.get('source_text') or neighbour.get('text') or ''),'source_text':None}
+                word=telegram_forward.media_word(quote)
+                if status and not saved:
+                    # Статус хода маршрут помнит, а текст нет: он и так из идущего хода; передаём только, чей это статус.
+                    try:whose=self.app.agents.get(status[0],archived=True)
+                    except HumanError:whose=None
+                    from .telegram_routes import agent_name
+                    quote_text='[статус хода'+(' «'+str(agent_name(whose))+'»' if whose is not None else '')+'; текст статуса не передаётся]'
+                else:
+                    quote_text=excerpt.get('text') or body(quote) or (saved or {}).get('source_text') or (saved or {}).get('text') or '['+(word+'; ' if word else 'медиа; ')+'текст цитаты не передан]'
+                # Своё слово хозяина (не пересланное) и ответ бота из чистого хода — без обёртки; ход заражается как раньше.
+                # Своё сообщение агента (ответ, уведомление, вопрос) — его слова: они и так в истории, цитата хода не заражает.
+                # Чужим остаётся только то, что несёт чужой текст: пересланное, внешняя цитата, уведомление почты/вебхука/рефлекса (хозяин 19.11).
+                if known and known.get('direction')=='in':foreign=bool(known.get('foreign',known.get('tainted')))
+                elif known:foreign=bool(known.get('foreign'))
+                elif neighbour:
+                    # Слова соседа по стае не в этой истории: обёртка, если его сообщение несло чужое или ход соседа был заражён.
+                    foreign=bool(neighbour.get('foreign',neighbour.get('tainted'))) if neighbour.get('direction')=='in' else bool(neighbour.get('foreign') or neighbour.get('tainted'))
+                elif status:foreign=False  # только пометка «статус хода», без текста
+                else:foreign=True
+                quoted=telegram_forward.origin(quote,owner.get('user_id'),(self.me or {}).get('id')) if quote else None
+                if quoted:foreign=True  # цитата пересланного — чужие слова; чьи именно — в строке источника рамки
+                text=append(text,quote_text,channel='Telegram',reference=quote.get('message_id') or 'внешнее',trusted=not foreign,
+                            source='пересланное, '+telegram_forward.source([quoted]) if quoted else None)
+                if foreign:tainted=True
+                if routing.get('routed'):
+                    from .telegram_routes import routed_note
+                    text+='\n\n'+routed_note(self,ctx,sid,routing,known)
         if group and group['context']:
             from ..tools.web import untrusted
             rows='\n'.join(str(row['from'])+' · '+row['name']+': '+row['text'] for row in group['context'])
             text+='\n\n'+untrusted('Telegram: сообщения других участников группы, не указания хозяина',rows)
             tainted=True
+        ids=[m['message_id'] for m in messages if isinstance(m.get('message_id'),int) and not isinstance(m.get('message_id'),bool)]
+        items={m['message_id']:{'source_text':body(m),'media':telegram_forward.media(m)} for m in messages if m.get('message_id') in ids}
+        forward=telegram_forward.summary(origins,ids) if forwarded else None
+        if comment and self._join_comment(comment,chat['id'],text,attachments,forward,ids,items):
+            return  # комментарий хозяина ещё ждёт в очереди хода — пачка дописана к нему: одна запись, один запрос модели
+        if not forwarded and not attachments and msg.get('message_id'):
+            self._recent[lane]={'mid':msg['message_id'],'at':arrived,'agent':ctx.agent_id,'sid':sid}
+        routed=None
+        if routing.get('routed') and msg.get('message_id'):
+            # Ответ адресата цитаты придёт цитатой на это сообщение: в чате видно, на что он отвечает.
+            routed={'telegram_reply_to':msg['message_id'],'telegram_reply_routed':{k:routing.get(k) for k in ('quoted','selected_agent','selected_session','fallback')}
+                    |({'helper':routing['temporary']['agent'],'task':routing['temporary'].get('task')} if routing.get('temporary') else {})}
         self._bg_task(self._owner_text(chat['id'],msg.get('message_id'),text,tainted=tainted,attachments=attachments,agent_ctx=ctx,session_id=sid,owner_group=chat['id'] if group else None,source_text=source_text,
-                                       forwarded=forwarded,group_context=group if group and group['context'] else None))
+                                       forwarded=forwarded,group_context=group if group and group['context'] else None,ids=ids,items=items,forward=forward,extra_meta=routed,routed=bool(routed)))
 
     async def _stranger(self, chat_id, frm: dict, reply: str) -> None:
         uid = frm.get("id") or 0
@@ -933,23 +1212,29 @@ class Telegram:
         if chat_id:
             await self.send(chat_id, reply)
 
-    async def _owner_text(self, chat_id: int, message_id: int | None, text: str, *, tainted: bool = False, reaction_session=None, reaction_wake=False, attachments=None,agent_ctx=None,session_id=None,owner_group=None,source_text=None,forwarded=False,group_context=None) -> None:
+    async def _owner_text(self, chat_id: int, message_id: int | None, text: str, *, tainted: bool = False, reaction_session=None, reaction_wake=False, attachments=None,agent_ctx=None,session_id=None,owner_group=None,source_text=None,forwarded=False,group_context=None,
+                          ids=None,items=None,forward=None,extra_meta=None,edit_wake=False,routed=False) -> None:
+        """routed — ответ цитатой ушёл не выбранному агенту: 👀 сразу (хозяин видит, что принято), ответ — цитатой на сообщение."""
         from .telegram_routes import bind
-        selected,chosen=self.selected(chat_id)
-        app=agent_ctx or selected
-        sid=reaction_session or session_id or (chosen if app is selected else app.main_session())
+        if agent_ctx is not None and (reaction_session or session_id):
+            app,sid=agent_ctx,reaction_session or session_id  # адрес уже выбран (в том числе цитатой при закрытой теме)
+        else:
+            selected,chosen=self.selected(chat_id)
+            app=agent_ctx or selected
+            sid=reaction_session or session_id or (chosen if app is selected else app.main_session())
         bind(self,chat_id,app,sid)
         attachments=attachments or []
         # агент ждёт ответа на вопрос без вариантов — это ответ, а не новое сообщение
-        for qid, q in (list(app.questions.items()) if not tainted and not attachments and not reaction_wake else []):
+        for qid, q in (list(app.questions.items()) if not tainted and not attachments and not reaction_wake and not edit_wake else []):
             if q["card"].get("session") in (sid, None) and q["card"].get("agent_id",app.agent_id)==app.agent_id and not q["card"].get("options"):
+                if message_id:self.remember(app,chat_id,message_id,sid,text,'in',source_text=source_text,answer=True)  # правку ответа агент увидит
                 app.answer(qid, text)
                 return
         typing_done=False
         typing = asyncio.ensure_future(self._typing(chat_id,alive=lambda:not typing_done)) if self.settings().get("live", "full") == "off" or owner_group is not None else None
-        self._reply_to[self.route_key(app,sid)] = message_id
+        if routed and message_id:self._bg_task(self._seen(chat_id,message_id))
         try:
-            if message_id:self.remember(app,chat_id,message_id,sid,text,'in',source_text=source_text,tainted=tainted,foreign=forwarded)
+            if message_id:self.remember(app,chat_id,ids or message_id,sid,text,'in',source_text=source_text,tainted=tainted,foreign=forwarded,items=items)
             key='telegram:reactions:'+sid
             pending=app.store.meta_get(key,[])
             if pending:
@@ -960,9 +1245,12 @@ class Telegram:
             started = time.monotonic()
             # Реплики участников уходят в историю вместе с этим сообщением: из буфера — только отданные, и только если ход их принял.
             taken=self.groups.take(group_context) if group_context else None
+            if message_id and not reaction_wake and app.mind.running(sid) and app.mind.delivery(sid,'telegram','owner')=='interrupt':
+                self._bg_task(self._seen(chat_id,message_id,'interrupt'))  # ⚡ — ради этого сообщения ход прерван
             try:
                 res = await app.mind.say(sid, text, content=parts, channel="telegram", actor="reaction" if reaction_wake else "owner",tainted=tainted or reaction_wake or any(a['kind']!='voice' for a in attachments),
-                                         unattended=reaction_wake,message_meta={'telegram_message_id':message_id,'telegram_chat_id':int(chat_id),'attachments':attachments,'telegram_route':{'chat':int(chat_id),'thread':getattr(chat_id,'thread',None)},'telegram_owner_requested':owner_group,**({'forwarded':True} if forwarded else {})})
+                                         unattended=reaction_wake,message_meta={'telegram_message_id':message_id,'telegram_chat_id':int(chat_id),'attachments':attachments,'telegram_route':{'chat':int(chat_id),'thread':getattr(chat_id,'thread',None)},'telegram_owner_requested':owner_group,
+                                                       **({'forwarded':True,'forward':forward} if forwarded else {}),**({'telegram_message_ids':list(ids)} if ids and len(ids)>1 else {}),**(extra_meta or {})})
             except HumanError:
                 if taken:self.groups.give_back(group_context,taken)
                 raise
@@ -970,7 +1258,7 @@ class Telegram:
                 t = app.mind.turns.get(sid)
                 busy = 'ход уже заканчивался'
                 if t and t.task and message_id and not t.task.done():
-                    self._bg_task(self._seen(chat_id, message_id))
+                    if not routed:self._bg_task(self._seen(chat_id, message_id, app.mind.pending_delivery(sid, message_id) or 'insert'))
                     busy = self._busy(app, t, sid)
                 res = await t.task if t and t.task else None
                 waited = time.monotonic() - started
@@ -985,21 +1273,30 @@ class Telegram:
         # Обычные и вставленные в ход ответы доставляются одним событием answer.
         # Команды навыков возвращаются сразу, не начиная ход.
         if res and not res.get("steps") and text.startswith(("/научись", "/убрать-навык")):
-            await self._answer(chat_id, sid, res, reply_to=message_id,agent_ctx=app)
+            await self._answer(chat_id, sid, res, reply_to=message_id if routed else None,agent_ctx=app)
 
     async def _answer(self, chat_id, sid, res, *, label="", reply_to=None,agent_ctx=None):
+        """reply_to — ответ на сообщение хозяина, пришедшее цитатой не выбранному агенту (иначе ответ обычный);
+        «↩#N» в начале ответа — цитатой на #N, «↩#N «фрагмент»» — ещё и с выделенным куском сообщения."""
         app = agent_ctx or self.app
         res = res or {}
         from ..core.dates import strip_labels
         reply = strip_labels((res.get("text") or "").strip())
         err = res.get("error")
         if not err and (res.get('sent_all') or reply and reply in res.get('channel_sent',[])):return
-        reply_to=None
-        explicit=re.match(r'^↩\s*#(\d+)\s*',reply)
+        quote=None
+        explicit=re.match(r'^↩\s*#(\d+)(?:[ \t]*«([^»]{1,1024})»)?\s*',reply)
         if explicit:
-            number=int(explicit[1]);reply=reply[explicit.end():]
-            try:self.require_ref(app,chat_id,number,sid);reply_to=number
-            except HumanError:app.journal.write('channel','Telegram: неизвестный номер ответа, отправлен обычным сообщением')
+            number=int(explicit[1]);whole=reply[re.match(r'^↩\s*#\d+\s*',reply).end():];reply=reply[explicit.end():]
+            try:
+                ref=self.require_ref(app,chat_id,number,sid);reply_to=number
+                quote=self.quote_fragment(ref,explicit[2]) if explicit[2] else None
+                if explicit[2] and not quote:
+                    reply=whole  # «…» не кусок сообщения (например, название) — остаётся в тексте ответа
+                    app.journal.write('channel','Telegram: фрагмент цитаты не найден в сообщении дословно — ответ без фрагмента',data={'message':number})
+            except HumanError:
+                if explicit[2]:reply=whole
+                app.journal.write('channel','Telegram: неизвестный номер ответа, отправлен обычным сообщением')
         if err and err.get("code") != "stopped":
             reply = (reply + "\n\n" if reply else "") + f"⚠ {err.get('title')}" + (f"\n{err.get('hint')}" if err.get("hint") else "")
         if reply:
@@ -1014,22 +1311,38 @@ class Telegram:
             if app.settings.get("voice","enabled",False) and app.settings.get("voice","telegram_reply",False):
                 try:
                     result=await app.voice.speak(reply,session_id=sid,format="opus")
-                    mid=await self.send_voice(chat_id,result["audio"])
+                    # Знак агента — подписью голосового: в общем чате стаи видно, чей это голос.
+                    mid=await self.send_voice(chat_id,result["audio"],caption=self.mark(app),reply_to=reply_to)
                     self.remember(app,chat_id,mid,sid,reply,'out',tainted=bool(res.get('tainted')))
                     return
                 except (HumanError,TelegramError,NetError) as exc:
                     app.journal.write("voice","Telegram: голос недоступен, отправлен текст",data={"reason":str(exc)})
                     reply += "\n\nГолос недоступен, отвечаю текстом: " + str(exc)
             reply=self.signed(app,reply)
-            mid=await self.send(chat_id, reply, reply_to=reply_to)
-            self.remember(app,chat_id,mid,sid,reply,'out',tainted=bool(res.get('tainted')))
+            ids=[]
+            mid=await self.send(chat_id, reply, reply_to=reply_to, quote=quote, ids=ids, agent=app)
+            self.remember(app,chat_id,ids or mid,sid,reply,'out',tainted=bool(res.get('tainted')))  # каждый кусок длинного ответа — его
             row=app.store.one("SELECT id FROM messages WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",(sid,))
             if row and mid:
                 app.store.x("UPDATE messages SET meta=json_set(meta,'$.telegram_message_id',?,'$.telegram_chat_id',?) WHERE id=?",(mid,chat_id,row['id']))
 
-    async def send_voice(self, chat_id, audio):
-        result=await self.api('sendVoice',{'chat_id':chat_id,'voice':'attach://voice'},files={'voice':{'name':'voice.ogg','mime':'audio/ogg','bytes':audio}})
+    async def send_voice(self, chat_id, audio, *, caption='', reply_to=None):
+        payload={'chat_id':chat_id,'voice':'attach://voice'}
+        if caption:payload['caption']=caption[:1024]
+        if reply_to:payload['reply_parameters']=self._reply(reply_to)  # multipart сам переводит составное поле в JSON
+        async with self.sending(chat_id):
+            result=await self.api('sendVoice',payload,files={'voice':{'name':'voice.ogg','mime':'audio/ogg','bytes':audio}})
+        self._wake_drafts(chat_id)
         return (result or {}).get('message_id')
+
+    @staticmethod
+    def quote_fragment(ref, fragment):
+        """Фрагмент для reply_parameters.quote: дословный кусок известного сообщения до 1024 знаков, иначе None."""
+        if not isinstance(fragment,str) or not isinstance(ref,dict):return None
+        fragment=fragment.strip()
+        source=str(ref.get('source_text') or ref.get('text') or '')
+        if not fragment or len(fragment)>1024 or fragment not in source:return None
+        return fragment
 
     async def _typing(self, chat_id: int, *, alive=None) -> None:
         try:
@@ -1071,6 +1384,7 @@ class Telegram:
         frm = cq.get("from") or {}
         data = str(cq.get("data") or "")
         ok_text = ""
+        card = {}  # чья карточка: подтверждение «→ …» под ней — тоже сообщение этого агента
         if not owner or frm.get("id") != owner.get("user_id"):
             ok_text = "Это кнопки хозяина."
         elif await self.commands.callback(cq):
@@ -1088,14 +1402,30 @@ class Telegram:
                     self.app.store.meta_set("skill.notice."+data[3:],None)
                 except HumanError as exc:
                     ok_text=exc.title+". "+exc.hint
+        elif data.startswith("nm:"):
+            # Кнопки под статусом хода: как доставить ждущие слова хозяина. Без лишнего сообщения — статус обновится сам.
+            m = cq.get("message") or {}
+            target = self._status_messages.get((int((m.get("chat") or {}).get("id") or 0), m.get("message_id")))
+            mode = data[3:]
+            try:
+                moved = await self.app.agents.get(target[0]).mind.redeliver(target[1], mode) if target else 0
+                ok_text = ({"interrupt": "⚡ Прерываю ход и отвечаю", "queue": "⏳ Отвечу после хода", "insert": "↪ Вставлю в ход"}.get(mode, "Готово")
+                           if moved else "Ждущих сообщений уже нет")
+            except HumanError as exc:
+                ok_text = exc.title
+            try:await self.api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": ok_text[:190]})
+            except TelegramError:pass
+            return
         elif data.startswith("ap:"):
             _, pid, choice = data.split(":", 2)
+            card = (self.app.guard.pending.get(pid) or {}).get("card") or {}
             done = self.app.guard.respond(pid, choice, by="owner")
             ok_text = {"once": "Разрешено", "task": "Разрешено в этом разговоре", "always": "Разрешено всегда", "deny": "Отказано"}.get(choice, "") if done else "Уже решено"
         elif data.startswith("q:"):
             _, qid, idx = data.split(":", 2)
             q = self.app.questions.get(qid)
-            opts = (q or {}).get("card", {}).get("options") or []
+            card = (q or {}).get("card") or {}
+            opts = card.get("options") or []
             if q and idx.isdigit() and int(idx) < len(opts):
                 self.app.answer(qid, opts[int(idx)])
                 ok_text = f"Ответ: {opts[int(idx)]}"
@@ -1106,7 +1436,11 @@ class Telegram:
             m = cq.get("message") or {}
             if m and ok_text and owner and frm.get("id") == owner.get("user_id"):
                 await self.api("editMessageReplyMarkup", {"chat_id": (m.get("chat") or {}).get("id"), "message_id": m.get("message_id"), "reply_markup": {"inline_keyboard": []}})
-                await self.send((m.get("chat") or {}).get("id"), f"→ {ok_text}")
+                sent = []
+                await self.send((m.get("chat") or {}).get("id"), f"→ {ok_text}", ids=sent)
+                if card.get("agent_id"):
+                    try:self._route_only(self.app.agents.get(card["agent_id"], archived=True), (m.get("chat") or {}).get("id"), sent, card.get("session"))
+                    except HumanError:pass
         except TelegramError:
             pass
 
@@ -1145,19 +1479,41 @@ class Telegram:
         if live:live.feed(ev)
 
     async def _finish_answer(self, live, chat, ev, reply_to, deliver,agent_ctx=None):
-        if live:await live.finish()
+        if live:
+            live.keep_status=bool(deliver)  # статус-сообщение удаляется после ответа, а не перед ним: ответ виден раньше
+            await live.finish()
         try:
             if not deliver or self.state=='off':return
             for delay in (*ANSWER_RETRY,None):
                 try:
                     await self._answer(chat,ev['session'],ev.get('result'),label=ev.get('label',''),reply_to=reply_to,agent_ctx=agent_ctx)
+                    if live:self._timed(live,agent_ctx)
                     return
                 except TelegramError as error:
                     # Сеть моргнула — ответ не выбрасываем, а пробуем ещё.
                     if error.code!='tg_net' or delay is None or self._stopping:raise
                     await asyncio.sleep(delay)
         finally:
-            if live:await self._end_draft(live)
+            if live:
+                await live.drop_status()
+                await self._end_draft(live)
+
+    def _timed(self, live, ctx=None):
+        """Где ждал ответ: до хода, молчание модели до первого слова, до текста у хозяина, весь ответ.
+        Медленный (дольше SLOW_ANSWER до первого слова или текста) — строка в журнал с самым долгим этапом."""
+        now=time.monotonic();start=live.t_got or live.t_live
+        stages={'queue':live.t_live-start,'model':(live.t_model or now)-live.t_live,
+                'shown':((live.t_text or now)-(live.t_model or now)) if live.t_model else 0.0,'total':now-start}
+        item={k:round(max(0.0,v),2) for k,v in stages.items()}
+        item.update(at=time.time(),agent=getattr(ctx or self.app,'agent_id','main'),measured=bool(live.t_got))
+        self.timing.append(item)
+        first=item['queue']+item['model']
+        if first<SLOW_ANSWER and item['total']<SLOW_ANSWER*4:return
+        names={'queue':'ждало до начала хода','model':'модель молчала до первого слова','shown':'текст шёл в Telegram'}
+        worst=max(names,key=lambda k:item[k])
+        def sec(v):return f'{v:.1f}'.replace('.',',')+' с'
+        self.app.journal.write('channel',f'Telegram: ответ через {sec(item["total"])} — дольше всего {names[worst]} ({sec(item[worst])}); '
+                               f'до хода {sec(item["queue"])}, модель {sec(item["model"])}, до текста {sec(item["shown"])}',actor='telegram',data=item)
 
     async def _close_live(self, live):
         await live.finish()
@@ -1169,15 +1525,19 @@ class Telegram:
         сообщения не было (агент всё отправил тулом, ответ пустой или ушёл в другой канал), шлём тихое
         «✓» и сразу удаляем: поле ввода освобождается, в чате ничего не остаётся."""
         if not live.drafted_at or self.state=='off' or self._stopping:return
-        try:key=(int(live.chat),getattr(live.chat,'thread',None))
-        except (TypeError,ValueError):return
+        key=self.slot(live.chat)
+        if key is None:return
         if self._sent_at.get(key,0)>=live.drafted_at:return
+        # Соседу по стае место черновика досталось позже: наш черновик уже заменён, «✓» закрыл бы его черновик.
+        if any(other is not live and not other.closed and self.slot(other.chat)==key and other.drafted_at>live.drafted_at for other in list(self._live.values())):return
         try:
-            result=await self.api('sendMessage',{'chat_id':live.chat,'text':'✓','disable_notification':True},timeout=8)
+            async with self.sending(live.chat):
+                result=await self.api('sendMessage',{'chat_id':live.chat,'text':'✓','disable_notification':True},timeout=8)
             mid=(result or {}).get('message_id') if isinstance(result,dict) else None
             if mid:await self.api('deleteMessage',{'chat_id':live.chat,'message_id':mid},timeout=8)
         except TelegramError as error:
             live.app.journal.write('channel','Telegram: не удалось закрыть черновик хода',data={'error':error.title[:200]})
+        self._wake_drafts(live.chat,skip=live)  # «✓» закрывает любой черновик этого места — открытый соседский уйдёт снова
 
     # исходящие по событиям ядра
 
@@ -1195,13 +1555,17 @@ class Telegram:
             return
         private=owner.get('chat_id') or owner.get('user_id')
         route=ev.get('telegram_route') or (ev.get('result') or {}).get('telegram_route') or {}
-        chat=self.topics.address(route['chat'],route.get('thread')) if route.get('chat') else self.destination(ctx,ev.get('session'))
+        if ev.get('type') in ('approval','question') and not route:
+            chat=self._card_destination(ev.get('card') or {})  # карточка — в тему спросившего агента, иначе в личку
+        else:
+            chat=self.topics.address(route['chat'],route.get('thread')) if route.get('chat') else self.destination(ctx,ev.get('session'))
         if chat!=private and (ev.get('type')!='answer' or (ev.get('result') or {}).get('telegram_owner_requested')!=chat):chat=private
         s=ctx.settings.group('telegram')
         t=ev.get('type');key=self.route_key(ctx,ev.get('session'))
         # Групповой ход не показывает черновики даже в личке хозяина.
         if not route.get('chat') or route.get('chat')==private:self._stream(ev,chat,ctx)
-        reply_to=self._reply_to.pop(key,None) if t=='answer' else None
+        # Ответ на сообщение, пришедшее цитатой не выбранному агенту, — цитатой на него (номер несёт сам ход).
+        reply_to=(ev.get('result') or {}).get('telegram_reply_to') if t=='answer' else None
         if t == "answer":
             live = self._live.pop(key, None)
             deliver = ev.get('channel') == 'telegram' and (ev.get('source') == 'telegram' or s.get('notify', True))
@@ -1209,7 +1573,7 @@ class Telegram:
         elif t == "message" and s.get("notify",True) and ev.get("message",{}).get("kind")=="skill":
             self._bg_task(self._skill_notice(chat,ev["message"],ctx))
         elif t == "notify" and s.get("notify", True) and ev.get("channel", "telegram") == "telegram":
-            icon = {"remind": "⏰", "alarm": "🚨", "job": "📋", "reflex": "🔔", "pulse": "💓", "mail": "📧", "hook": "🪝", "update": "🔄"}.get(ev.get("kind"), "•")
+            icon = {"remind": "⏰", "alarm": "🚨", "job": "📋", "reflex": "🔔", "pulse": "💓", "mail": "📧", "hook": "🪝", "update": "🔄", "load": "📈"}.get(ev.get("kind"), "•")
             text = str(ev.get("text") or "")
             if not text.startswith(icon):
                 text = f"{icon} {text}"
@@ -1226,7 +1590,9 @@ class Telegram:
             what = what.replace("```", "ʼʼʼ")
             text = f"⚠ Предохранитель спрашивает:\n```\n{what}\n```\n{c.get('reason') or ''}" + ("\nВ этом ходе агент читал недоверенное." if c.get("tainted") else "") \
                 + (("\nДействие длинное — целиком в файле выше." if full else "\nДействие показано не целиком — одобрить можно только в пульте.") if cut else "")
-            self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [r for r in (row, row2) if r], full=full if cut else ""))
+            # Карточка запоминается за спросившим агентом: ответ на неё цитатой — обычное слово этому агенту, не одобрение.
+            self._bg_task(self._card(c["id"], chat, self._card_signed(c, text), [r for r in (row, row2) if r], route=(c.get("agent_id","main"), c.get("session")),
+                                     full=full if cut else "", tainted=bool(c.get("tainted"))))
         elif t == "question" and s.get("approvals", True):
             c = ev.get("card") or {}
             opts = c.get("options") or []
@@ -1235,7 +1601,8 @@ class Telegram:
         elif t in ("approval_done", "question_done"):
             ref = self._cards.pop(str(ev.get("id")), None)
             if ref:
-                closed = {"timeout": "⌛ Одобрение истекло — не выполнялось", "cancelled": "Ход остановлен — не выполнялось"}.get(str(ev.get("choice") or ""))
+                closed = {"timeout": "⌛ Одобрение истекло — не выполнялось", "cancelled": "Ход остановлен — не выполнялось",
+                          "steer": "✉ Ты написал сообщение — не выполнялось"}.get(str(ev.get("choice") or ""))
                 keyboard = [[{"text": closed, "callback_data": "x"}]] if closed else []  # видно, что это не отказ хозяина (охота 20.11)
                 self._bg_task(self.api("editMessageReplyMarkup", {"chat_id": ref[0], "message_id": ref[1], "reply_markup": {"inline_keyboard": keyboard}}))
 
@@ -1260,9 +1627,10 @@ class Telegram:
     async def _notice(self, chat, text, ctx, sid=None, *, agent=True, foreign=False):
         """Уведомление запоминается как сказанное агентом: ответ на него придёт с текстом, а не «медиа»."""
         if agent:text=self.signed(ctx,text)
-        mid=await self.send(chat,text)
+        ids=[]
+        mid=await self.send(chat,text,ids=ids,agent=ctx if agent else None)
         # Тема письма, тело вебхука, вывод рефлекса — чужой текст; пульс, напоминание, задача — слова самого агента.
-        self.remember(ctx,chat,mid,sid or ctx.main_session(),text,'out',tainted=foreign,foreign=foreign)
+        self.remember(ctx,chat,ids or mid,sid or ctx.main_session(),text,'out',tainted=foreign,foreign=foreign)
 
     async def _skill_notice(self,chat,message,agent_ctx=None):
         data=message.get("data") or {}
@@ -1270,35 +1638,65 @@ class Telegram:
         from ..core.ids import new_id
         token=new_id()[-12:].lower()
         self.app.store.meta_set("skill.notice."+token,{"name":data["name"],"hash":data.get("hash"),"agent_id":(agent_ctx or self.app).agent_id})
-        text=self.signed(agent_ctx or self.app,str(message.get("content") or "💾 Навык: "+data["name"]))
-        mid=await self.send(chat,text,buttons=[[{"text":"Убрать навык","callback_data":"sk:"+token}]])
-        ctx=agent_ctx or self.app;self.remember(ctx,chat,mid,ctx.main_session(),text,'out')
+        ctx=agent_ctx or self.app
+        text=self.signed(ctx,str(message.get("content") or "💾 Навык: "+data["name"]))
+        ids=[]
+        mid=await self.send(chat,text,buttons=[[{"text":"Убрать навык","callback_data":"sk:"+token}]],ids=ids,agent=ctx)
+        self.remember(ctx,chat,ids or mid,ctx.main_session(),text,'out')
 
     def _card_signed(self, card, text):
         try:ctx=self.app.agents.get(card['agent_id'],archived=True) if card.get('agent_id') else None
         except HumanError:ctx=None
         return self.signed(ctx,text)
 
+    def _card_destination(self, card):
+        """Куда карточке одобрения/вопроса: где хозяин говорит с этим ходом (тема или личка), затем тема разговора;
+        без адреса — личка. Пропавшая тема чинится при отправке (api → topics.repair)."""
+        owner=self.owner() or {};private=owner.get('chat_id') or owner.get('user_id')
+        try:asker=self.app.agents.get(card['agent_id'],archived=True) if card.get('agent_id') else self.app
+        except HumanError:return private
+        sid=card.get('session')
+        if not isinstance(sid,str):return private
+        turn=asker.mind.turns.get(sid)
+        route=(turn.state.get('_telegram_route') if turn else None) or {}
+        try:
+            chat=self.topics.address(route['chat'],route.get('thread')) if route.get('chat') else self.destination(asker,sid)
+        except HumanError:return private
+        return chat if chat==private else private
+
+    def _route_only(self, ctx, chat, ids, sid=None):
+        """Маршрут без текста служебного сообщения агента (статус, «→ Ответ передан»): ответ цитатой на него — этому агенту."""
+        if ctx is None or not ids:return
+        from . import telegram_refs
+        try:telegram_refs.put_routes(self.app,chat,list(ids),ctx.agent_id,sid if isinstance(sid,str) else None)
+        except Exception as error:  # noqa: BLE001 — учёт маршрута не мешает доставке
+            self.app.journal.write('channel','Telegram: маршрут служебного сообщения не записан: '+str(error)[:200],actor='telegram')
+
     def _question_for(self, chat, message):
         """Открытый вопрос, карточку которого хозяин процитировал."""
         if not message:return None
         return next((cid for cid,(c,m) in list(self._cards.items()) if m==message and int(c)==int(chat) and cid in self.app.questions),None)
 
-    async def _card(self, cid: str, chat: int, text: str, buttons, route=None, full: str = "") -> None:
-        if full:
-            # Длинное действие целиком — файлом перед карточкой: хозяин одобряет с телефона то, что прочитал (охота 20.11).
-            try:
-                await self.api("sendDocument", {"chat_id": chat, "document": "attach://action", "caption": "Действие целиком"},
-                               files={"action": {"name": "action.txt", "mime": "text/plain", "bytes": full.encode("utf-8")}})
-            except TelegramError:
-                buttons = [[{"text": "Нет", "callback_data": f"ap:{cid}:deny"}]]
-                text = text.replace("целиком в файле выше", "файл не отправился, одобрить можно только в пульте")
-        mid = await self.send(chat, text, buttons=buttons)
+    async def _card(self, cid: str, chat: int, text: str, buttons, route=None, full: str = "", tainted=False) -> None:
+        """tainted — карточка хода, читавшего чужое: в ней может быть чужая команда, цитата карточки остаётся в обёртке."""
+        ids=[]
+        async with self.sending(chat):  # файл и карточка — подряд, без сообщений соседа между ними
+            if full:
+                # Длинное действие целиком — файлом перед карточкой: хозяин одобряет с телефона то, что прочитал (охота 20.11).
+                try:
+                    result=await self.api("sendDocument", {"chat_id": chat, "document": "attach://action", "caption": "Действие целиком"},
+                                          files={"action": {"name": "action.txt", "mime": "text/plain", "bytes": full.encode("utf-8")}})
+                    if isinstance((result or {}).get('message_id'),int):ids.append(result['message_id'])
+                except TelegramError:
+                    buttons = [[{"text": "Нет", "callback_data": f"ap:{cid}:deny"}]]
+                    text = text.replace("целиком в файле выше", "файл не отправился, одобрить можно только в пульте")
+            mid = await self.send(chat, text, buttons=buttons, ids=ids)
         if mid:
             self._cards[cid] = (chat, mid)
             if route:
                 # карточка запоминается за спросившим агентом: ответ на неё цитатой (и после закрытия вопроса) идёт ему
                 try:
-                    asker=self.app.agents.get(route[0] or 'main')
-                    self.remember(asker,chat,mid,route[1] or asker.main_session(),text,'out')
+                    asker=self.app.agents.get(route[0] or 'main',archived=True)
+                    sid=route[1] if isinstance(route[1],str) else (None if self.app.agents.record(asker.agent_id)['temporary'] else asker.main_session())
+                    self.remember(asker,chat,ids or mid,sid,text,'out',tainted=tainted,foreign=tainted)
                 except HumanError:pass

@@ -75,6 +75,7 @@ class FakeState:
         self.tg_topics = False
         self.tg_topic_next = 100
         self.tg_missing_threads = set()
+        self.tg_bad_quote = False  # Telegram не находит фрагмент reply_parameters.quote в сообщении
         self.tg_sent: list[dict] = []
         self.tg_next_id = 1
         self.tg_event: asyncio.Event | None = None
@@ -400,16 +401,24 @@ def create_router(state: FakeState | None = None) -> Router:
 
     @r.route("POST", "/fake/tg/update")
     async def tg_push(req):
-        """Положить входящее: {"text": …, "from": {"id": …}} или готовый update (с message / callback_query)."""
+        """Положить входящее: {"text"|"caption": …, "from": {"id": …}, "forward_origin"/"media_group_id": …} или готовый update
+        (с message / edited_message / callback_query / message_reaction / my_chat_member)."""
         b = req.json() or {}
         uid = state.tg_next_id
         state.tg_next_id += 1
-        if "message" in b or "edited_message" in b or "callback_query" in b:
+        if any(key in b for key in ("message", "edited_message", "callback_query", "message_reaction", "my_chat_member")):
             upd = {"update_id": uid, **b}
         else:
             frm = {"id": 42, "is_bot": False, "first_name": "Хозяин", "username": "owner", **(b.get("from") or {})}
-            upd = {"update_id": uid, "message": {"message_id": 1000 + uid, "from": frm, "chat": {"id": frm["id"], "type": b.get("chat_type", "private")},
-                                                 "date": int(time.time()), "text": b.get("text", "")}}
+            message = {"message_id": 1000 + uid, "from": frm, "chat": {"id": frm["id"], "type": b.get("chat_type", "private")}, "date": int(time.time())}
+            if "caption" in b:
+                message["caption"] = b["caption"]
+            if "text" in b or "caption" not in b:
+                message["text"] = b.get("text", "")
+            for key in ("forward_origin", "media_group_id"):
+                if key in b:
+                    message[key] = b[key]
+            upd = {"update_id": uid, "message": message}
         state.tg_updates.append(upd)
         if state.tg_event:
             state.tg_event.set()
@@ -476,6 +485,9 @@ def create_router(state: FakeState | None = None) -> Router:
         if b.get('message_thread_id') in state.tg_missing_threads:
             state.tg_sent.append({'method':method,**b,'rejected':True})
             return JSONResponse({'ok':False,'error_code':400,'description':'Bad Request: message thread not found'},400)
+        if state.tg_bad_quote and method in ('sendMessage','sendRichMessage') and (b.get('reply_parameters') or {}).get('quote'):
+            state.tg_sent.append({'method':method,**b,'rejected':True})
+            return JSONResponse({'ok':False,'error_code':400,'description':'Bad Request: QUOTE_TEXT_INVALID'},400)
         if method in ('createForumTopic','editForumTopic'):
             state.tg_sent.append({'method':method,**b})
             if method=='editForumTopic':return tg_ok(True)

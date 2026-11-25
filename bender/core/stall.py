@@ -8,7 +8,13 @@
 Если цикл не ожил совсем (бесконечный цикл, тяжёлое регулярное выражение), запись «после» не появится никогда,
 а процесс так и будет держать процессор. На этот случай — таймер faulthandler: цикл переводит его каждые
 несколько секунд; не перевёл HANG секунд — стеки всех потоков пишутся в local/hang.txt и процесс выходит,
-Сторож или systemd поднимают его заново. Таймер живёт в потоке C и срабатывает, даже когда занят GIL."""
+Сторож или systemd поднимают его заново. Таймер живёт в потоке C и срабатывает, даже когда занят GIL.
+
+Главный поток часто невиновен: он ждёт в select, пока другой поток (asyncio.to_thread с тяжёлым регулярным
+выражением, разбором JSON, SQLite) держит GIL. Пока цикл здоров, на каждом стуке запоминаются тики процессора
+каждого потока (/proc/self/task, десятки микросекунд); после зависания разница показывает, кто на самом деле
+жёг процессор, — и «где встал» называет этот поток. Тот же поток раз в секунду дёргает tick (анализ нагрузки
+LoadWatch сам решает, пора ли замер): отдельного потока опроса нет."""
 from __future__ import annotations
 
 import faulthandler
@@ -19,6 +25,8 @@ import time
 import traceback
 from collections import deque
 from pathlib import Path
+
+from ..body import load as cpu
 
 STALL = 5.0      # с какого простоя это зависание, а не просто медленный шаг
 INTERVAL = 1.0
@@ -44,9 +52,35 @@ def place(frame, limit=40) -> list[str]:
 def ours(stack: list[str]) -> str:
     """Самое глубокое место в коде Бендера: по нему видно, чья это блокировка."""
     for line in reversed(stack):
-        if not line.split(':', 1)[0] in ('threading.py', 'selectors.py', 'base_events.py', 'events.py', 'runners.py', 'tasks.py'):
+        if not line.split(':', 1)[0] in ('threading.py', 'selectors.py', 'base_events.py', 'events.py', 'runners.py', 'tasks.py', 'thread.py', 'queue.py'):
             return line
     return stack[-1] if stack else 'неизвестно'
+
+
+def told(record) -> str:
+    """Зависание для сообщения: виновник найден — его фраза («поток … держал процессор»), иначе «цикл стоял в …»."""
+    where = str(record.get('where') or 'неизвестно')
+    return where if record.get('culprit') or where.startswith('неизвестно') else 'цикл стоял в ' + where
+
+
+WAITING = ('select', 'poll', 'epoll', 'wait', 'acquire', '_worker', 'get', 'sleep', 'recv', 'recv_into', 'read', 'readline', 'communicate')
+WAIT_FILES = ('threading.py', 'queue.py', 'thread.py', 'socket.py', 'ssl.py', 'subprocess.py', 'tasks.py', 'base_events.py')
+
+
+def waiting(stack: list[str]) -> bool:
+    """Поток стоит в ожидании (select, замок, очередь стандартной библиотеки), а не считает сам.
+    Имя функции сверяется только для файлов стандартной библиотеки: свой get или read в коде Бендера — работа."""
+    if not stack:
+        return True
+    top = stack[-1].split(' — ', 1)[0]
+    name = top.split(':', 1)[0]
+    return name == 'selectors.py' or (name in WAIT_FILES and top.rsplit(' ', 1)[-1] in WAITING)
+
+
+def thread_stacks(limit: int = 25) -> dict[int, tuple[str, list[str]]]:
+    """Стеки всех потоков Python сейчас: {ident: (имя, стек сверху вниз)}."""
+    names = {t.ident: t.name for t in threading.enumerate()}
+    return {ident: (names.get(ident, f'поток {ident}'), place(frame, limit)) for ident, frame in sys._current_frames().items()}
 
 
 class LoopWatch:
@@ -57,6 +91,7 @@ class LoopWatch:
         self.stall = stall
         self.interval = interval
         self.ident = threading.get_ident()  # создаётся в потоке цикла
+        self.native = threading.get_native_id()
         self.seen = time.monotonic()
         self.current = None
         self.recent = deque(maxlen=KEEP)
@@ -67,6 +102,12 @@ class LoopWatch:
         self.hang_path = path.with_name('hang.txt') if path else None
         self._hang_file = None
         self._armed = 0.0
+        self.tick = None          # раз в секунду с этого же потока: замер нагрузки (LoadWatch.tick), сам решает, пора ли
+        self.thread_cpu = True    # тики потоков на каждом стуке — для виновника зависания; выключается с анализом нагрузки
+        self._baselines = deque(maxlen=3)  # (monotonic, тики потоков) последних здоровых стуков
+        self._late = None         # (когда послан, задержка) стука, на который цикл ответил позже STALL
+        self._covered = 0.0       # стуки, посланные раньше этого (monotonic), относятся к уже записанному зависанию
+        self._own = None          # native id самого сторожа: себя виновником не называет
 
     def previous_hang(self) -> str:
         """Прошлый процесс вышел по таймеру зависания: забрать его стеки (файл переносится в hang-last.txt)."""
@@ -120,9 +161,14 @@ class LoopWatch:
         return self.lag >= limit
 
     def _beat(self, sent: float | None = None) -> None:
-        self.seen = time.monotonic()
+        now = time.monotonic()
         if sent is not None:
-            self.delays.append(max(0.0, self.seen - sent))
+            delay = max(0.0, now - sent)
+            # Поздний ответ запоминается раньше, чем обновится seen: сторож, увидевший свежий seen, увидит и его.
+            if delay > self.stall and sent > self._covered and self._late is None:
+                self._late = (sent, delay)
+            self.delays.append(delay)
+        self.seen = now
         if self._hang_file is not None and self.seen - self._armed > REARM:
             self._arm()
 
@@ -131,28 +177,112 @@ class LoopWatch:
         return place(frame) if frame is not None else []
 
     def _run(self) -> None:
+        self._own = threading.get_native_id()
         while not self._stop.wait(self.interval):
+            # Сначала — сколько цикл молчит, потом новый стук: иначе освободившийся после чужого тяжёлого
+            # вызова цикл успевает ответить на свежий стук раньше замера, и зависание теряется.
+            behind = time.monotonic() - self.seen
             try:
                 self.loop.call_soon_threadsafe(self._beat, time.monotonic())
             except RuntimeError:
                 return  # цикл закрыт
-            behind = time.monotonic() - self.seen
             if behind > self.stall:
                 stack = self._sample()
                 if self.current is None:
-                    self.current = {'started': time.time() - behind, 'first': stack, 'last': stack}
+                    started = time.monotonic() - behind
+                    before = self._baseline(started)
+                    self.current = {'started': time.time() - behind, 'first': stack, 'last': stack,
+                                    'stacks': thread_stacks() if before else {}, 'before': before}
                 else:
                     self.current['last'] = stack  # стоит дольше — смотрим, не сдвинулось ли место
             elif self.current is not None:
                 record, self.current = self.current, None
                 record['seconds'] = round(time.time() - record['started'] - behind, 1)
                 record['where'] = ours(record['first'])
-                self.recent.append(record)
-                self._dump(record)
-                try:
-                    self.loop.call_soon_threadsafe(self.on_stall, record)
-                except RuntimeError:
+                if not self._finish(record):
                     return
+            elif self._late is not None:
+                # Чужой поток держал GIL тяжёлым вызовом C: молчал и сам сторож, а цикл ответил на стук раньше, чем
+                # сторож проснулся. Зависание видно только по позднему ответу — записать его задним числом.
+                sent, delay = self._late
+                self._late = None
+                if sent > self._covered:
+                    before = self._baseline(sent)
+                    record = {'started': time.time() - (time.monotonic() - sent), 'first': [], 'last': [], 'seconds': round(delay, 1),
+                              'where': 'неизвестно: цикл и сторож ждали GIL', 'stacks': thread_stacks() if before else {}, 'before': before}
+                    if not self._finish(record):
+                        return
+            elif behind < self.interval + 1.0:
+                if self.thread_cpu:
+                    # цикл здоров: точка отсчёта для следующего зависания (если /proc нет — больше не пробуем)
+                    ticks = cpu.thread_ticks()
+                    if ticks is None:
+                        self.thread_cpu = False
+                    else:
+                        self._baselines.append((time.monotonic(), ticks))
+                elif self._baselines:
+                    self._baselines.clear()  # анализ выключен: старая точка отсчёта обвинила бы не того
+            if self.tick is not None:
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001 — замер нагрузки не должен останавливать сторожа цикла
+                    pass
+
+    def _baseline(self, started: float):
+        """Тики потоков последнего здорового стука до начала зависания (monotonic): (когда, тики) или None."""
+        chosen = None
+        for item in list(self._baselines):
+            if item[0] <= started or chosen is None:
+                chosen = item
+        return chosen
+
+    def _finish(self, record) -> bool:
+        """Зависание кончилось: виновник, память, stalls.txt, сообщение циклу. False — цикл уже закрыт."""
+        self._covered = time.monotonic()
+        self._late = None
+        self._blame(record)
+        self.recent.append(record)
+        self._dump(record)
+        try:
+            self.loop.call_soon_threadsafe(self.on_stall, record)
+        except RuntimeError:
+            return False
+        return True
+
+    def _blame(self, record) -> None:
+        """Кто жёг процессор, пока цикл молчал: тики потоков от последнего здорового стука до оживления.
+        Главный поток ждал, а другой работал — «где встал» называет этот поток."""
+        before, stacks = record.pop('before', None), record.pop('stacks', {})
+        record['threads'] = []
+        if not before:
+            return
+        at, ticks = before
+        rows = cpu.thread_cpu(ticks, cpu.thread_ticks(), time.monotonic() - at)
+        for row in rows[:6]:
+            stack = stacks.get(row['ident'], ('', []))[1] if row['ident'] is not None else []
+            record['threads'].append({'name': row['name'], 'seconds': row['seconds'], 'pct': row['pct'], 'main': row['tid'] == self.native,
+                                      'stack': [] if row['tid'] == self._own else stack[-12:]})
+        main = next((row for row in rows if row['tid'] == self.native), None)
+        other = next((row for row in rows if row['tid'] not in (self.native, self._own)), None)
+        spent = main['seconds'] if main else 0.0
+        total = sum(row['seconds'] for row in rows if row['tid'] != self._own)
+        enough = max(0.5, 0.2 * record['seconds'])
+        if not record['first'] and spent >= enough and spent >= 0.6 * total:
+            # Сторож не застал цикл (ждал GIL), а процессор за это время взял сам цикл: один долгий вызов C без
+            # отдачи GIL прямо в цикле — регулярное выражение, разбор, сжатие. Места не видно, но виновник — не другой поток.
+            record['culprit'] = main['name']
+            record['where'] = f"цикл сам держал процессор {spent} с одним долгим вызовом без отдачи GIL — места не видно"
+            return
+        if other is None:
+            return
+        # Процессорное время, а не стена: на занятой узле поток с GIL получает лишь часть ядра. Виновник — тот, кто
+        # взял большую часть процессора процесса за зависание (не меньше 0,5 с и пятой части его длины), а цикл за
+        # то же время сам потратил меньше половины от него.
+        if other['seconds'] >= enough and other['seconds'] >= 0.6 * total and spent < 0.5 * other['seconds']:
+            stack = stacks.get(other['ident'], ('', []))[1] if other['ident'] is not None else []
+            spot = ours(stack) if stack and not waiting(stack) else ''
+            record['culprit'] = other['name']
+            record['where'] = f"поток «{other['name']}» держал процессор {other['seconds']} с, цикл ждал" + (f" — {spot}" if spot else '')
 
     def _dump(self, record) -> None:
         if not self.path:
@@ -160,9 +290,17 @@ class LoopWatch:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             text = (f"=== {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record['started']))}: цикл стоял {record['seconds']} с\n"
-                    "Где встал:\n  " + '\n  '.join(record['first']) + '\n')
+                    + (f"Виновник: {record['where']}\n" if record.get('culprit') else '')
+                    + "Где встал главный поток:\n  " + ('\n  '.join(record['first']) or 'не видно: GIL держал другой поток, сторож проснулся уже после') + '\n')
             if record['last'] != record['first']:
                 text += 'Где был перед тем, как ожить:\n  ' + '\n  '.join(record['last']) + '\n'
+            if record.get('threads'):
+                text += 'Процессор потоков за время зависания:\n' + ''.join(
+                    f"  {t['name']}{' (цикл)' if t['main'] else ''}: {t['seconds']} с ({t['pct']}%)\n" for t in record['threads'])
+                for t in record['threads'][:3]:
+                    if t['stack'] and not t['main']:
+                        note = ' (уже ждал работы: тяжёлый вызов закончился раньше, чем сторож смог посмотреть)' if waiting(t['stack']) else ''
+                        text += f"Стек потока {t['name']} в начале зависания{note}:\n  " + '\n  '.join(t['stack']) + '\n'
             with self.path.open('a', encoding='utf-8') as stream:
                 stream.write(text + '\n')
             if self.path.stat().st_size > 2 * 1024 * 1024:  # не растёт бесконечно: оставляем свежую половину
@@ -175,7 +313,8 @@ class LoopWatch:
         """Зависания, задевшие отрезок времени (time.time())."""
         found = [r for r in self.recent if r['started'] < end and r['started'] + r['seconds'] > start]
         if self.current and self.current['started'] < end:
-            found.append({**self.current, 'seconds': round(time.time() - self.current['started'], 1), 'where': ours(self.current['first'])})
+            current = {k: v for k, v in self.current.items() if k not in ('stacks', 'before')}
+            found.append({**current, 'seconds': round(time.time() - self.current['started'], 1), 'where': ours(self.current['first'])})
         return found
 
 

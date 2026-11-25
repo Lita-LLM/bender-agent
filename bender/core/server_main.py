@@ -20,6 +20,20 @@ from .termui import Term
 from .watchdog import EXIT_CONFIG, load_boot
 
 EXIT_RESTART = 75  # «перезапусти меня» — для Сторожа (обновления, правки себя)
+HOUSEKEEPING_DELAY = 180.0  # секунд до первой уборки после обрыва (BENDER_HOUSEKEEPING_DELAY — для любого старта)
+
+
+def housekeeping_delay(abnormal: bool) -> float:
+    """Первая уборка после штатного старта — сразу, как всегда. После зависания, падения или обрыва — через 3 минуты:
+    узел и так занят стартом, а полный догон индекса и векторов на слабой машине сам может стать новым зависанием
+    (три падения подряд — безопасный режим)."""
+    raw = os.environ.get("BENDER_HOUSEKEEPING_DELAY")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return HOUSEKEEPING_DELAY if abnormal else 0.0
 
 
 def lan_addresses() -> list[str]:
@@ -121,7 +135,8 @@ async def _serve(args, term: Term) -> int:
     app.request_restart = lambda: (restart.__setitem__("flag", True), stop.set())
     app.request_shutdown = stop.set
 
-    async def housekeeping():
+    async def housekeeping(delay: float):
+        await asyncio.sleep(delay)
         while True:
             try:
                 await asyncio.to_thread(app.housekeeping)
@@ -131,11 +146,10 @@ async def _serve(args, term: Term) -> int:
                 pass
             await asyncio.sleep(86400)
 
-    keeper = asyncio.ensure_future(housekeeping())
-    from .stall import LoopWatch
+    from .stall import LoopWatch, told
 
     def stalled(record):
-        app.journal.write("system", f"Бендер не отвечал {record['seconds']} с — цикл стоял в {record['where']}. Стек: local/stalls.txt",
+        app.journal.write("system", f"Бендер не отвечал {record['seconds']} с — {told(record)}. Стек: local/stalls.txt",
                           data={"seconds": record["seconds"], "where": record["where"], "stack": record["first"][-12:]})
 
     app.loop_watch = LoopWatch(loop, stalled, app.dirs.local / "stalls.txt")
@@ -146,6 +160,12 @@ async def _serve(args, term: Term) -> int:
         app.journal.write("alarm", f"Бендер завис и перезапустился сам: цикл стоял в {where}. Стеки: local/hang-last.txt", data={"where": where, "stack": hang[-3000:]})
         # каналы ещё не подняты: сообщить хозяину чуть позже
         loop.call_later(20, app.bus.publish, {"type": "notify", "kind": "alarm", "title": "Бендер завис и перезапустился", "text": f"Цикл стоял в {where}. Стеки всех потоков — в local/hang-last.txt; покажи их разработчику."})
+    # Анализ нагрузки — тем же потоком сторожа цикла (tick), и в безопасном режиме: там он только считает и
+    # сообщает, заведующего узлом не зовёт. Прошлый запуск оборвался без остановки — скажет и это.
+    app.load_watch.start(loop, app.loop_watch)
+    unclean = app.load_watch.boot(hang=bool(hang))
+    crashed = bool(load_boot(app.dirs.root).get("crashes"))  # Сторож помнит недавние падения ядра
+    keeper = asyncio.ensure_future(housekeeping(housekeeping_delay(bool(hang or unclean or crashed or app.safe))))
     app.loop_watch.start()
     if not app.safe:
         app.heart.start()  # задачи по времени; в безопасном режиме сердце молчит

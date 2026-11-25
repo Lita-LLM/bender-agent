@@ -155,12 +155,14 @@ class Correspondence:
         future=asyncio.get_running_loop().create_future();job={'watched':bool(wait)}
         self.spawn(self.dispatch(ctx,letter,future,job))
         if not wait:return {'id':letter,'state':'queued','text':'Сообщение отправлено; ответ придёт позже.'}
-        try:
-            async with self.manager.pause_background(ctx.turn.get('_background_lease')):
-                return await asyncio.wait_for(asyncio.shield(future),self.host.settings.get('agent_chat','timeout_seconds',180))
-        except asyncio.TimeoutError:
-            job['watched']=False
-            return {'id':letter,'state':'waiting','text':'Адресат ещё работает; ответ придёт позже.'}
+        from ..mind import steer
+        async with self.manager.pause_background(ctx.turn.get('_background_lease')):
+            outcome=await steer.wait(steer.event(ctx.turn),asyncio.shield(future),self.host.settings.get('agent_chat','timeout_seconds',180))
+        if outcome=='done':return future.result()
+        job['watched']=False  # ответ придёт отдельным сообщением
+        if outcome=='steer':
+            return {'id':letter,'state':'waiting','text':'Ожидание прервано: пришло новое сообщение хозяина — прочитай его на следующем шаге. Адресат работает дальше; ответ придёт позже.'}
+        return {'id':letter,'state':'waiting','text':'Адресат ещё работает; ответ придёт позже.'}
 
     async def dispatch(self, source, letter, future, job):
         row=self.get(letter);answer={'id':letter,'state':'error','text':'Не удалось доставить сообщение.','tainted':True}

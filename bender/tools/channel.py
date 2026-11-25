@@ -12,19 +12,22 @@ def session(ctx):
 
 def register(reg):
     @reg.tool('send_message','Написать в разговор',group='channel')
-    async def send_message(ctx: ToolContext, text: str, reply_to: int | None = None, complete: bool = False) -> ToolResult:
+    async def send_message(ctx: ToolContext, text: str, reply_to: int | None = None, complete: bool = False, quote: str | None = None) -> ToolResult:
         """Отправить хозяину сообщение сейчас. Обычно достаточно 1–3 сообщений за ход.
 
         text — текст сообщения
         reply_to — номер Telegram [#…] из этого разговора; без него обычное сообщение
         complete — всё уже отправлено; отдельный финальный ответ больше не нужен
+        quote — только с reply_to: дословный кусок того сообщения (до 1024 знаков); Telegram выделит его в цитате
         """
         row=session(ctx)
         from ..core.dates import strip_labels
         text=strip_labels(text)
         if not text.strip():raise HumanError('channel_empty','Сообщение пустое','Напиши текст.')
         channel=row.get('meta',{}).get('home_channel','pult')
-        mid=None
+        mid=None;note=''
+        if quote is not None and (not isinstance(quote,str) or reply_to is None):
+            raise HumanError('channel_quote','Цитата без номера сообщения','Укажи reply_to — номер сообщения, из которого кусок, или убери quote.')
         if channel=='userbot':  # разговор аккаунта Telegram: адрес и разрешение — по списку чатов хозяина, а не «хозяину»
             bot=ctx.app.userbot;chat=bot.chat_of(ctx.session_id)
             if chat is None:raise HumanError('channel_off','У разговора нет чата Telegram','Напиши через tg_send с id чата.')
@@ -41,11 +44,13 @@ def register(reg):
             owner=tg.owner()
             if not owner or tg.state!='ok':raise HumanError('channel_off','Telegram сейчас не подключён','Проверь «Связи».')
             chat=tg.tool_destination(ctx)
-            if reply_to is not None:tg.require_ref(ctx.app,chat,reply_to,ctx.session_id)
+            ref=tg.require_ref(ctx.app,chat,reply_to,ctx.session_id) if reply_to is not None else None
+            fragment=tg.quote_fragment(ref,quote) if quote else None
+            if quote and not fragment:note=' Кусок для цитаты не найден в #'+str(reply_to)+' дословно (или длиннее 1024 знаков) — ответ цитатой на сообщение целиком.'
             await tg.authorize_group(ctx,chat,'сообщение группе: '+text[:1000])
-            signed=tg.signed(ctx.app,text)
-            mid=await tg.send(chat,signed,reply_to=reply_to)
-            tg.remember(ctx.app,chat,mid,ctx.session_id,signed,'out')
+            signed=tg.signed(ctx.app,text);ids=[]
+            mid=await tg.send(chat,signed,reply_to=reply_to,quote=fragment,ids=ids,agent=ctx.app)
+            tg.remember(ctx.app,chat,ids or mid,ctx.session_id,signed,'out')  # каждый кусок — за этим агентом
         elif channel=='matrix':
             mid=await ctx.app.host.matrix.send(ctx,text,reply_to=reply_to)
         elif channel=='speaker':
@@ -55,7 +60,7 @@ def register(reg):
         ctx.app.mind._save_event(ctx.session_id,'channel_sent',(f'[#{mid}] ' if mid else '')+text)
         ctx.turn.setdefault('channel_sent',[]).append(text)
         ctx.turn['sent_all']=complete
-        return ToolResult('Отправлено'+(f' [#{mid}]' if mid else '')+'.',summary='сообщение хозяину',data={'message_id':mid})
+        return ToolResult('Отправлено'+(f' [#{mid}]' if mid else '')+'.'+note,summary='сообщение хозяину',data={'message_id':mid})
 
     @reg.tool('send_file','Отправить файл',group='channel',params={'type':'object','required':['path'],'properties':{
         'path':{'anyOf':[{'type':'string'},{'type':'array','items':{'type':'string'},'minItems':2,'maxItems':10}],'description':'Путь или 2–10 путей альбома'},
@@ -102,11 +107,13 @@ def register(reg):
                 kinds={f['kind'] for f in files}
                 if not (kinds<= {'photo','video'} or kinds=={'document'} or kinds=={'audio'}):raise HumanError('album_kind','Этот набор нельзя отправить альбомом','Фото и видео можно смешивать; документы и аудио — только со своим видом.')
                 entries=[{'type':f['kind'],'media':'attach://file'+str(n),**({'caption':caption} if n==0 and caption else {})} for n,f in enumerate(files)]
-                result=await tg.api('sendMediaGroup',{'chat_id':chat,'media':entries},files={'file'+str(n):f for n,f in enumerate(files)})
-                for message in result or []:tg.remember(ctx.app,chat,message.get('message_id'),ctx.session_id,caption or '[альбом]','out')
+                async with tg.sending(chat):  # не между кусками ответа соседа по стае
+                    result=await tg.api('sendMediaGroup',{'chat_id':chat,'media':entries},files={'file'+str(n):f for n,f in enumerate(files)})
+                tg.remember(ctx.app,chat,[message.get('message_id') for message in result or []],ctx.session_id,caption or '[альбом]','out')
             else:
                 item=files[0];field=item['kind'];method={'photo':'sendPhoto','document':'sendDocument','voice':'sendVoice','video':'sendVideo','audio':'sendAudio'}[field]
-                result=await tg.api(method,{'chat_id':chat,'caption':caption},files={field:item})
+                async with tg.sending(chat):
+                    result=await tg.api(method,{'chat_id':chat,'caption':caption},files={field:item})
                 tg.remember(ctx.app,chat,(result or {}).get('message_id'),ctx.session_id,caption or '[файл]','out')
             return ToolResult('Файл отправлен в Telegram.',summary='файл хозяину')
         if channel=='matrix':

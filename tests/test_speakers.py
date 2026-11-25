@@ -482,6 +482,20 @@ class ConversationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published[-1]['channel'], 'telegram')
         self.assertIn('Ночное', published[-1]['text'])
 
+    async def test_load_notice_is_not_an_alarm_aloud(self):
+        # Сообщение о нагрузке — своего вида: в режиме «только тревоги» колонка его не говорит, тревогу (OOM, перегрев) — да.
+        self.station.sid, self.station.link, self.station.state = 'S1', None, 'ok'
+        spoken = []
+
+        async def announce(ctx, sid, text, **kw):
+            spoken.append(text)
+        self.station.announce = announce
+        self.owner.cfg.update(announce='alarms', quiet_from=0, quiet_to=0)
+        await self.owner.notified({'type': 'notify', 'kind': 'load', 'agent_id': '*', 'title': 'Нагрузка', 'text': 'Бендер держит 95% ядра'})
+        self.assertEqual(spoken, [])
+        await self.owner.notified({'type': 'notify', 'kind': 'alarm', 'agent_id': '*', 'title': 'Нагрузка', 'text': 'система убила процесс'})
+        self.assertEqual(spoken, ['Нагрузка система убила процесс'])
+
     async def test_voice_approval(self):
         self.fake.requests = 2
         card = {'id': 'c1', 'agent_id': 'main', 'session': 'S1', 'summary': 'Обновить Бендер', 'can_session': True}

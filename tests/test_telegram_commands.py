@@ -42,6 +42,13 @@ class CommandsTest(TempDirCase):
                 self.assertLess(len(group),len(private))
                 self.assertTrue(all(any('А'<=ch<='я' for ch in row['description']) for row in private))
             count=len(calls)
+            # Меню поменялось (новая команда в выпуске): все ISO не обходятся снова — только найденные языки.
+            app.store.meta_set('telegram:commands_hash','другое меню')
+            await tg.commands.sync()
+            again=calls[count:]
+            self.assertFalse(any(c['method']=='getMyCommands' and c['language_code']=='zu' for c in again))
+            self.assertEqual({c['language_code'] for c in again if c['method']=='getMyCommands'},{'','ru','en','de','fr'})
+            count=len(calls)
             await tg.restart()
             await self.until(lambda:tg.state=='ok' and tg.commands.task is not None and tg.commands.task.done())
             self.assertEqual(len(calls),count)

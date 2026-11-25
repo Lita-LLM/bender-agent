@@ -65,6 +65,7 @@ class AgentContext:
         self._modules = None
         self._matrix=None
         self._speakers=None
+        self._load_watch=None
         self._userbot=None
         self._userbot_runtime=None
         self._api_runtime=None
@@ -164,6 +165,15 @@ class AgentContext:
             from ..modules.matrix_channel import Matrix
             self._matrix=Matrix(self)
         return self._matrix
+
+    @property
+    def load_watch(self):
+        """Анализ нагрузки узла и Бендера — один на процесс. Замеры начинает server_main (LoadWatch.start)."""
+        if self.host is not self:return self.host.load_watch
+        if self._load_watch is None:
+            from .loadwatch import LoadWatch
+            self._load_watch=LoadWatch(self)
+        return self._load_watch
 
     @property
     def speakers(self):
@@ -343,16 +353,20 @@ class AgentContext:
 
     # вопрос хозяину (тул ask_owner)
 
-    async def ask_owner(self, question: str, options: list[str], *, session_id: str | None = None, timeout: float = 1800) -> str | None:
+    async def ask_owner(self, question: str, options: list[str], *, session_id: str | None = None, timeout: float = 1800, steer=None):
+        """Ответ хозяина, None по сроку или mind.steer.STEERED: хозяин не ответил, а написал новое сообщение
+        (режим «вставлять» — вопрос закрывается, модель прочитает сообщение на следующем шаге)."""
+        from ..mind import steer as steermod
+        if steer is not None and steer.is_set():
+            return steermod.STEERED
         qid = new_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         card = {"id": qid, "question": question, "options": options, "session": session_id, "agent_id":self.agent_id, "ts": time.time()}
         self.questions[qid] = {"card": card, "future": fut}
         self.bus.publish({"type": "question", "agent_id":"*", "card": card})
         try:
-            return await asyncio.wait_for(asyncio.shield(fut), timeout)
-        except asyncio.TimeoutError:
-            return None
+            outcome = await steermod.wait(steer, asyncio.shield(fut), timeout)
+            return fut.result() if outcome == 'done' else steermod.STEERED if outcome == 'steer' else None
         finally:
             self.questions.pop(qid, None)
             self.bus.publish({"type": "question_done", "agent_id":"*", "id": qid})
@@ -416,6 +430,7 @@ class AgentContext:
         if self.host is self and self._api_runtime is not None:await self._api_runtime.close()
         if self.host is self and self._matrix is not None:await self._matrix.close()
         if self.host is self and self._speakers is not None:await self._speakers.close()
+        if self.host is self and self._load_watch is not None:self._load_watch.stop()
         if self._userbot is not None:await self._userbot.close()
         if self.host is self and hasattr(self,'_lifecycle'):await self._lifecycle.close()
         if self.host is self:await self.hooks.close()  # раньше остановки ходов: остановка — не «провал» события

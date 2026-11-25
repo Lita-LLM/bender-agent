@@ -128,6 +128,7 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
             "cost_total": round(host_app.agents.total_cost(),6), "cost_today": round(app.cost_today(), 6), "safe": app.safe, "mood": app.body.mood(),
             "pending": [p["card"] for p in app.guard.pending.values()] + [{"kind": "question", **q["card"]} for q in app.questions.values()],
             "running": app.mind.running(app.main_session()),
+            "new_message": app.settings.get("agent", "new_message", "insert"), "new_message_engine": _steer_engine(app),
             "boot": _boot_info(app),
             "model_notice": app.store.meta_get('models:removed_notice'),
             'update_available': bool(app.store.meta_get('updates:available')),
@@ -245,8 +246,25 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
         items=[media.get(app.context(),key) for key in keys]
         if sum(i['size'] for i in items)>media.DOWNLOAD_LIMIT:raise HumanError('attachment_size','Вложения больше 20 МБ суммарно','Отправь их отдельно.')
         parts=media.content(text or 'Прислано вложение.',items,vision=app.settings.get('attachments','vision',True),audio=app.settings.get('voice','enabled',False) and app.settings.get('voice','stt_mode') in ('native','both')) if items else None
-        await app.mind.say(sid, text or 'Прислано вложение.', content=parts, channel="pult", wait=False,tainted=bool(items) or quoted,message_meta={'attachments':items,**({'reply_to':reply_to} if reply_to else {})})
+        delivery=b.get('delivery')
+        if delivery is not None and not isinstance(delivery,str):raise HumanError('delivery','Непонятный режим доставки','insert, interrupt или queue.')
+        await app.mind.say(sid, text or 'Прислано вложение.', content=parts, channel="pult", wait=False,tainted=bool(items) or quoted,message_meta={'attachments':items,**({'reply_to':reply_to} if reply_to else {})},
+                           delivery=delivery or None)
         return {"ok": True, "session": sid}
+
+    @r.route("GET", "/api/session/{sid}/pending")
+    @J
+    async def pending_words(req):
+        """Слова хозяина идущего хода, ещё не увиденные моделью, и режим по умолчанию."""
+        from ..mind import steer
+        return {**app.mind.pending(req.params["sid"]), "default": steer.default(app), "engine": steer.engine_note(app)}
+
+    @r.route("POST", "/api/session/{sid}/pending")
+    @J
+    async def pending_redeliver(req):
+        """Разово сменить доставку ждущих слов: insert — вставить в ход, interrupt — прервать и ответить, queue — после хода."""
+        moved=await app.mind.redeliver(req.params["sid"], str(body(req).get("mode") or ""))
+        return {"moved": moved, **app.mind.pending(req.params["sid"])}
 
     @r.route("POST", "/api/stop")
     @J
@@ -917,6 +935,28 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
     @J
     async def body_state(req):
         return await asyncio.to_thread(app.body.snapshot, full=True)
+
+    @r.route("GET", "/api/load")
+    @J
+    async def load_state(req):
+        """Анализ нагрузки: кольцо замеров за час, необычное, отчёты; ?top=1 — кто берёт процессор сейчас (полсекунды)."""
+        watch = host_app.load_watch
+        out = watch.public()
+        if req.q("top") == "1":
+            out["top"] = await asyncio.to_thread(watch.top_now)
+        return out
+
+    @r.route("GET", "/api/load/report/{name}")
+    @J
+    async def load_report_text(req):
+        name = req.params["name"]
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-z]+\.txt", name):
+            raise HumanError("load_report", "Нет такого отчёта", "Выбери отчёт из списка на экране «Тело».", status=404)
+        path = host_app.load_watch.folder() / name
+        try:
+            return {"name": name, "text": await asyncio.to_thread(path.read_text, encoding="utf-8")}
+        except OSError:
+            raise HumanError("load_report", "Отчёт уже удалён", "Хранится только несколько последних отчётов (Настройки → Нагрузка).", status=404) from None
 
     # --- связь ---------------------------------------------------------------------------
 
@@ -2057,6 +2097,11 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
             if active_token is not None: ACTIVE.reset(active_token)
 
     return handler
+
+
+def _steer_engine(app) -> str:
+    from ..mind.steer import engine_note
+    return engine_note(app)
 
 
 def _boot_info(app) -> dict:

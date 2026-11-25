@@ -45,6 +45,9 @@ BASE_SCHEMA = [
 ]
 
 
+# Расходы за день и ошибки за полчаса фильтруют вызовы по времени: без индекса — полный обход таблицы на каждый вопрос пульта.
+CALLS_TIME = ["""CREATE INDEX IF NOT EXISTS calls_by_time ON calls(created_at)"""]
+
 MIGRATION_COPIES = 2  # копий базы перед миграциями в local/migration-backups
 
 
@@ -81,6 +84,7 @@ class Store:
             for pragma in ("journal_mode=WAL", "synchronous=NORMAL", "foreign_keys=ON", "temp_store=MEMORY", "busy_timeout=10000"):
                 self.db.execute(f"PRAGMA {pragma}")
             self.migrate("base", 1, BASE_SCHEMA)
+            self.migrate("calls_time", 1, CALLS_TIME)
         except sqlite3.Error as exc:
             if self.db:self.db.close()
             from .errors import HumanError

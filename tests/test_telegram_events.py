@@ -97,10 +97,16 @@ class TelegramEventsTest(TempDirCase):
             async with await app.http.post(env.base+'/fake/tg/update',json={'edited_message':edit}) as response:self.assertTrue(response.ok)
             await self.until(lambda:any(r['meta'].get('telegram_edit')==1008 for r in app.store.messages(env.sid)))
             self.assertIn('edited_message',env.fake.state.tg_poll['allowed_updates'])
-            rows=app.store.messages(env.sid);self.assertIn('Было → Стало',rows[-1]['content'])
-            self.assertEqual(rows[0]['content'],'Было')
-            for modified in (edit,{**edit,'from':{'id':99},'text':'Чужой'},{**edit,'message_id':9999,'text':'Неизвестный'}):await tg._handle({'edited_message':modified})
-            self.assertEqual(app.store.messages(env.sid),rows)
+            rows=app.store.messages(env.sid);self.assertIn('было: Было\nстало: Стало',rows[-1]['content'])
+            self.assertIn('Хозяин исправил своё сообщение #1008',rows[-1]['content']);self.assertNotIn('служебный факт',rows[-1]['content'])
+            self.assertEqual(rows[0]['content'],'Было');self.assertEqual(rows[0]['meta']['edited']['new'],'Стало')  # «изменено» в пульте — только meta
+            for modified in (edit,{**edit,'from':{'id':99},'text':'Чужой'}):await tg._handle({'edited_message':modified})
+            self.assertEqual(len(app.store.messages(env.sid)),len(rows))
+            # Неизвестное старое сообщение лички — в выбранный разговор, без выдуманного прежнего текста и без хода.
+            await tg._handle({'edited_message':{**edit,'message_id':9999,'text':'Неизвестный'}})
+            unknown=app.store.messages(env.sid)[-1]
+            self.assertEqual(len(app.store.messages(env.sid)),len(rows)+1);self.assertIn('прежний текст неизвестен',unknown['content'])
+            self.assertIn('Неизвестный',unknown['content']);self.assertTrue(unknown['meta']['service_event'])
             self.assertEqual(len([r for r in env.fake.state.requests if r.get('api')=='openai']),count)
             self.assertFalse(app.mind.running(env.sid))
 
@@ -118,7 +124,7 @@ class TelegramEventsTest(TempDirCase):
             release.set();await self.until(lambda:not tg._bg)
             rows=app.store.messages(env.sid)
             self.assertEqual([r['role'] for r in rows],['user','assistant','tool','user','assistant'])
-            self.assertIn('Купи два → Купи три',rows[3]['content']);self.assertEqual(rows[-1]['content'],'Учёл правку.')
+            self.assertIn('было: Купи два\nстало: Купи три',rows[3]['content']);self.assertEqual(rows[-1]['content'],'Учёл правку.')
             sent=json.dumps([r for r in env.fake.state.requests if r.get('api')=='openai'][-1]['body']['messages'],ensure_ascii=False)
             self.assertIn('Купи три',sent);self.assertEqual(len([r for r in env.fake.state.requests if r.get('api')=='openai']),2)
 

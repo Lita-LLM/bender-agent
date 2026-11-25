@@ -23,8 +23,11 @@ FILES={'doctor.json':'Состояние проверок без адресов,
        'journal.json':'Последние решения: время, вид события и разрешённые технические поля; без текста и идентификаторов.',
        'logs.json':'Последние строки журнала падения: только классы ошибок и кадры программы; исходный текст исключён.',
        'settings.json':'Только известные числовые переключатели и фиксированные варианты; строки, JSON, ключи и адреса исключены.',
+       'load.json':'Последние отчёты о необычной нагрузке: время, вид, числа процессора и памяти, места в коде Бендера (модуль:строка); имена и строки запуска процессов исключены.',
        'README.txt':'Версия, состав и пределы отчёта.'}
-KINDS={'system','turn','decision','alarm','channel','backup','skill','update','rollback','exam','workshop.proxy','heart','sleep'}
+KINDS={'system','turn','decision','alarm','channel','backup','skill','update','rollback','exam','workshop.proxy','heart','sleep','load'}
+LOAD_SUBJECTS={'bender','stalls','node','memory','heat'}
+LOAD_NUMBERS=('own','sys','iowait','steal','load1','mem','swap','psi_cpu','psi_mem','psi_io','lag','temp','stalls')
 ACTORS={'owner','agent','heart','cron','system','telegram','mail','sleep'}
 ERRORS={'ValueError','TypeError','OSError','PermissionError','FileNotFoundError','HumanError','DatabaseError','OperationalError','RuntimeError','MemoryError','TimeoutError','ConnectionError','UnicodeError'}
 
@@ -61,10 +64,59 @@ def log_rows(root,limit):
     return out
 
 
+def code_frame(value):
+    """«bender/…/файл.py:строка» из кода самой программы — иначе None (чужие пути и библиотеки не попадают)."""
+    if not isinstance(value,str):return None
+    match=re.fullmatch(r'(bender/[a-zA-Z0-9_/.-]+\.py):(\d+)',value)
+    if not match or '..' in match[1]:return None
+    try:
+        if (PROGRAM_DIR/match[1]).is_file():return {'module':match[1],'line':int(match[2])}
+    except OSError:pass
+    return None
+
+
+def load_rows(root,count=10):
+    """Отчёты local/load: только числа, вид и места в коде Бендера. Имена процессов, строки запуска, задачи и причины — нет."""
+    try:paths=sorted((Path(root)/'local'/'load').glob('*.json'))[-count:]
+    except OSError:return []
+    out=[]
+    for path in reversed(paths):
+        try:report=json.loads(path.read_text(encoding='utf-8'))
+        except (OSError,ValueError):continue
+        if not isinstance(report,dict):continue
+        record={'subject':report.get('subject') if report.get('subject') in LOAD_SUBJECTS else 'other'}
+        if finite(report.get('at')):record['at']=report['at']
+        if isinstance(report.get('critical'),bool):record['critical']=report['critical']
+        if finite(report.get('cores')):record['cores']=report['cores']
+        numbers=report.get('numbers') if isinstance(report.get('numbers'),dict) else {}
+        record['numbers']={key:numbers[key] for key in LOAD_NUMBERS if finite(numbers.get(key))}
+        snap=report.get('snapshot') if isinstance(report.get('snapshot'),dict) else {}
+        if finite(snap.get('own')):record['own']=snap['own']
+        threads=[]
+        for item in (snap.get('threads') or [])[:6]:
+            if not isinstance(item,dict) or not finite(item.get('pct')):continue
+            frames=[]
+            for pair in item.get('frames') or []:
+                frame=code_frame(pair[0]) if isinstance(pair,list) and len(pair)==2 and finite(pair[1]) else None
+                if frame:frames.append({**frame,'count':pair[1]})
+            threads.append({'pct':item['pct'],'main':item.get('main') is True,'frames':frames[:4]})
+        record['threads']=threads
+        tasks=[]
+        for item in (snap.get('tasks') or [])[:5]:
+            frame=code_frame(item.get('frame')) if isinstance(item,dict) else None
+            if frame and finite(item.get('share')):tasks.append({**frame,'share':item['share']})
+        record['tasks']=tasks
+        system=snap.get('system') if isinstance(snap.get('system'),dict) else {}
+        record['system']={key:system[key] for key in ('busy','iowait','steal') if finite(system.get(key))}
+        out.append(record)
+    return out
+
+
 def build(root,*,limit=100):
     plan=preview(limit);root=Path(root);doctor=collect(root);reader=None
     checks=[]
-    numbers={'bytes','wal_bytes','port','candidates','broken','agents','last','last_verify','free_bytes','total_bytes','starts','pid','rss_mb','threads','fds','wchar','write_bytes'}
+    numbers={'bytes','wal_bytes','port','candidates','broken','agents','last','last_verify','free_bytes','total_bytes','starts','pid','rss_mb','threads','fds','wchar','write_bytes',
+             'reports','samples','anomalies','own_pct','own_5m_pct','sys_pct','load1','mem_free_pct','lag'}
     switches={'limits','in_use','enabled','configured','verified','safe','watched','pending','has_previous','available','running'}
     enums={'os':{'linux','win32','darwin','cygwin','android'},'kind':{'bwrap','none','unshare','job','rlimit'},'state':{'off','connecting','checking','ok','error','не проверялся'}}
     for row in doctor['rows']:
@@ -75,7 +127,7 @@ def build(root,*,limit=100):
             elif key=='python' and isinstance(value,str) and re.fullmatch(r'\d+\.\d+\.\d+(?:[a-z]\d+)?',value):details[key]=value
         record['details']=details;checks.append(record)
     payload={'doctor.json':{'format':1,'version':__version__,'ok':doctor['ok'],'rows':checks},
-             'journal.json':[],'logs.json':log_rows(root,limit),'settings.json':{}}
+             'journal.json':[],'logs.json':log_rows(root,limit),'settings.json':{},'load.json':load_rows(root)}
     try:
         if (root/'bender.db').exists():
             reader=Reader(root/'bender.db')

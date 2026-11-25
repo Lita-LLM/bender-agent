@@ -106,6 +106,9 @@ function Attachments({items=[]}) {
 }
 function messageText(value){return Array.isArray(value)?value.filter(p=>p.type==='text').map(p=>p.text).join('\n'):value||'';}
 
+function forwardText(f={}){const date=f.date?new Date(f.date*1000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';return '↪ переслано от '+(f.name||'неизвестно кого')+(f.count>1?' · '+f.count+' сообщ.':'')+(date?' · '+date:'');}
+function editedTitle(e={}){return e.media?'Заменено вложение':'было: '+(e.old||'')+'\nстало: '+(e.new||'');}
+
 function channelText(meta={}){const route=meta.telegram_route||{};return (CHANNEL_NAMES[meta.channel]||meta.channel||'')+(meta.channel==='telegram'?(meta.telegram_owner_requested||route.chat<0?' · группа':'')+(route.thread?' · тема #'+route.thread:''):'');}
 
 function LinkRequest({ link }) {
@@ -115,7 +118,30 @@ function LinkRequest({ link }) {
   return html` <span class="row"><${Button} small kind="primary" onClick=${() => decide("yes", "Связь открыта")}>Разрешить</${Button}><${Button} small onClick=${() => decide("ask", "Разрешено с одобрением каждого письма")}>С одобрением</${Button}><${Button} small onClick=${() => decide("no", "Агент узнает, что пока нет")}>Не сейчас</${Button}></span>`;
 }
 
-function Message({ m, results, name, onWhat, onReply, onThread, agentNames }) {
+// Новое сообщение во время хода: как доставить (Настройки → Агент → «Новое сообщение во время хода»).
+const DELIVERY = [["insert", "↪ Вставлять", "агент увидит его на ближайшем шаге: ждущая команда уходит в фон, карточка и вопрос закрываются"],
+  ["interrupt", "⚡ Прерывать", "ход останавливается, как по «Стоп», и сразу начинается новый с твоим сообщением"],
+  ["queue", "⏳ После хода", "сообщение ждёт конца хода и начинает следующий"]];
+const RUNNING_HINT = { insert: "Написать во время работы — вставлю в идущий ход", interrupt: "Написать во время работы — прерву ход и отвечу", queue: "Написать во время работы — отвечу после хода" };
+function deliveryText(meta = {}) {
+  if (meta.queued) return meta.delivery === "queue" ? " · ⏳ после хода" : meta.delivery === "interrupt" ? " · ⚡ прерываю ход" : " · ↪ вставлю в идущий ход";
+  if (meta.mid_turn) return " · ↪ вставлено в ход";
+  if (meta.delivery === "queue") return " · ⏳ после хода";
+  if (meta.delivery === "interrupt") return " · ⚡ прервал ход";
+  return "";
+}
+function PendingActions({ meta, onDeliver }) {
+  // Разовый выбор для слов, которые модель ещё не видела: действует на все ждущие слова этого хода.
+  const [busy, setBusy] = useState(false);
+  if (!meta?.queued || !meta.pending || !onDeliver || meta.delivery === "interrupt") return null;
+  const act = async (mode) => { setBusy(true); try { await onDeliver(mode); } finally { setBusy(false); } };
+  return html`<span class="pending-actions">
+    ${meta.delivery === "queue" ? html`<button class="btn small" disabled=${busy} title="Агент увидит на ближайшем шаге" onClick=${() => act("insert")}>↪ Вставить</button>`
+      : html`<button class="btn small" disabled=${busy} title="Не показывать модели до конца хода" onClick=${() => act("queue")}>⏳ После хода</button>`}
+    <button class="btn small" disabled=${busy} title="Остановить ход и сразу ответить на это" onClick=${() => act("interrupt")}>⚡ Прервать и ответить</button></span>`;
+}
+
+function Message({ m, results, name, onWhat, onReply, onThread, agentNames, onDeliver }) {
   if(m.meta?.service_event)return html`<div class="event service-event">${m.meta.display||messageText(m.content)}${m.meta.link_request?html`<${LinkRequest} link=${m.meta.link_request}/>`:null}${m.meta.correspondence_notice&&onThread?html` <button class="btn small" onClick=${()=>onThread(m.meta.correspondence_notice.session)}>Открыть переписку</button>`:null}</div>`;
   if(m.meta?.tool_media)return html`<div class="event tool-media"><div class="m-text" dangerouslySetInnerHTML=${{__html:mdToHtml(messageText(m.content))}}></div></div>`;
   if (m.role === "event") {
@@ -123,7 +149,8 @@ function Message({ m, results, name, onWhat, onReply, onThread, agentNames }) {
   }
   if (m.role === "user") {
     return html`<div class=${`msg human${m.meta?.queued ? " queued" : ""}`}><div class="me-face">Я</div><div class="m-body">
-      <div class="m-head"><span class="m-name">${m.meta?.correspondence_sender?.name?"Агент "+m.meta.correspondence_sender.name:m.meta?.actor?.startsWith("agent:")?"Агент "+(agentNames?.[m.meta.actor.slice(6)]||m.meta.actor.slice(6)):ACTOR_NAMES[m.meta?.actor] || (m.meta?.actor && m.meta.actor !== "owner" ? "Не хозяин" : "Хозяин")}</span><span class="m-meta">${m.created_at ? timeOf(m.created_at) : ""}${m.meta?.channel ? ' · '+channelText(m.meta) : ''}${m.meta?.queued ? " · вставлю в идущий ход" : ""}${m.meta?.imported ? ` · из ${m.meta.imported === "openclaw" ? "OpenClaw" : m.meta.imported}` : ""}</span>${m.id&&onReply?html`<button class="btn small" onClick=${()=>onReply(m)}>Ответить</button>`:null}</div>
+      <div class="m-head"><span class="m-name">${m.meta?.correspondence_sender?.name?"Агент "+m.meta.correspondence_sender.name:m.meta?.actor?.startsWith("agent:")?"Агент "+(agentNames?.[m.meta.actor.slice(6)]||m.meta.actor.slice(6)):ACTOR_NAMES[m.meta?.actor] || (m.meta?.actor && m.meta.actor !== "owner" ? "Не хозяин" : "Хозяин")}</span><span class="m-meta">${m.created_at ? timeOf(m.created_at) : ""}${m.meta?.channel ? ' · '+channelText(m.meta) : ''}${deliveryText(m.meta)}${m.meta?.imported ? ` · из ${m.meta.imported === "openclaw" ? "OpenClaw" : m.meta.imported}` : ""}${m.meta?.edited?html` · <span class="m-edited" title=${editedTitle(m.meta.edited)}>изменено</span>`:''}</span>${m.id&&onReply?html`<button class="btn small" onClick=${()=>onReply(m)}>Ответить</button>`:null}<${PendingActions} meta=${m.meta} onDeliver=${onDeliver}/></div>
+      ${m.meta?.forward?html`<div class="m-forward">${forwardText(m.meta.forward)}</div>`:null}
       <div class="m-text" dangerouslySetInnerHTML=${{ __html: mdToHtml(messageText(m.content)) }}></div><${Attachments} items=${m.meta?.attachments||[]}/></div></div>`;
   }
   const meta = m.meta || {};
@@ -195,6 +222,17 @@ export function ChatScreen() {
       const m = ev.message;
       if (m.role === "assistant") setLive((l) => l && { ...l, text: "", reasoning: "" });
       setMsgs((xs) => [...xs, { ...m, created_at: m.created_at || Date.now() / 1000 }]);
+    } else if (ev.type === "message_amended") {
+      // сообщение ещё ждало в очереди хода и было исправлено (или к нему дописано пересланное)
+      const amended = ev.message, id = amended.meta?.telegram_message_id;
+      setMsgs((xs) => xs.map((x) => x.meta?.queued && id != null && x.meta?.telegram_message_id === id ? { ...x, ...amended, created_at: x.created_at } : x));
+    } else if (ev.type === "message_delivered") {
+      // слово хозяина легло в историю: вставлено в ход (модель его увидит сейчас) или ход закончился («после хода»)
+      setMsgs((xs) => xs.map((x) => ev.pending && x.meta?.pending === ev.pending ? { ...x, id: ev.id, meta: { ...x.meta, queued: false, delivery: ev.delivery, mid_turn: !!ev.mid_turn } } : x));
+    } else if (ev.type === "pending_moved") {
+      setMsgs((xs) => xs.map((x) => ev.pending && x.meta?.pending === ev.pending ? { ...x, meta: { ...x.meta, delivery: ev.delivery } } : x));
+    } else if (ev.type === "message_meta") {
+      setMsgs((xs) => xs.map((x) => x.role === "user" && x.meta?.telegram_chat_id === ev.telegram_chat_id && (x.meta?.telegram_message_id === ev.telegram_message_id || (x.meta?.telegram_message_ids || []).includes(ev.telegram_message_id)) ? { ...x, meta: { ...x.meta, edited: ev.edited } } : x));
     } else if (ev.type === "tool_start") {
       setLive((l) => ({ ...(l || { text: "", reasoning: "" }), tools: [...(l?.tools || []), { id: ev.id, name: ev.name, arguments: ev.arguments }] }));
     } else if (ev.type === "tool_end") {
@@ -218,6 +256,11 @@ export function ChatScreen() {
   };
   const compactNow=async()=>{setCompacting(true);try{await post('/api/memory/compact',{session:sid,action:'now'});toast('Начало разговора пересказано, история сохранена');await load();}catch(error){setErr(error);}finally{setCompacting(false);}};
   const stop = async () => { try { await post("/api/stop", { session: sid }); } catch (e) { toast(e.message, "error"); } };
+  const mode = st?.new_message || "insert";
+  const setMode = async (value) => {
+    try { await post("/api/settings/agent", { new_message: value }); await refresh(); toast("Сообщение во время хода: " + DELIVERY.find((d) => d[0] === value)[1]); } catch (e) { toast(e.message, "error"); }
+  };
+  const deliver = async (value) => { try { await post(`/api/session/${sid}/pending`, { mode: value }); } catch (e) { toast(e.message, "error"); } };
 
   if (st && !st.has_model && !readOnly) {
     return html`<div class="page"><div class="page-inner"><${Welcome} /></div></div>`;
@@ -234,7 +277,7 @@ export function ChatScreen() {
         ${!list.length && !live ? html`<div class="empty"><div style="font-size:2.4rem"><${Visor} /></div>
           <h2>${st?.born ? `${name} на связи` : "Агент только что проснулся"}</h2>
           <p class="muted">${st?.born ? "Напиши, что сделать." : "Он ещё не знает, кто он и где оказался. Напиши что-нибудь — начнётся знакомство."}</p></div>` : null}
-        ${list.map((m, i) => html`<${Message} key=${m.id || i} m=${m} results=${results} name=${name} onWhat=${setWhat} onReply=${readOnly?null:setQuote} onThread=${id=>{chatLoad();choose(id);}} agentNames=${agentNames} />`)}
+        ${list.map((m, i) => html`<${Message} key=${m.id || i} m=${m} results=${results} name=${name} onWhat=${setWhat} onReply=${readOnly?null:setQuote} onThread=${id=>{chatLoad();choose(id);}} agentNames=${agentNames} onDeliver=${readOnly?null:deliver} />`)}
         ${live && (live.text || live.reasoning) ? html`<div class="msg"><${BotFace} busy /><div class="m-body">
           <div class="m-head"><span class="m-name">${name}</span><span class="m-meta">пишет…</span></div>
           ${live.reasoning ? html`<details class="reasoning"><summary>Размышления</summary><div>${live.reasoning}</div></details>` : null}
@@ -246,8 +289,11 @@ export function ChatScreen() {
       </div>
     </div>
     ${readOnly?html`<div class="note correspondence-readonly">Переписка агентов · только чтение. Поручение отправь в обычном чате.</div>`:html`<div class="composer">${quote?html`<div class="note quote-preview">Цитата: ${messageText(quote.content).slice(0,240)} <button class="btn small" aria-label="Отменить цитату" onClick=${()=>setQuote(null)}>×</button></div>`:null}<div class="row">${files.map(file=>html`<span class="note small">📎 ${file.name} <button aria-label=${'Убрать '+file.name} onClick=${()=>setFiles(files.filter(f=>f.id!==file.id))}>×</button></span>`)}</div><input ref=${picker} type="file" multiple hidden onChange=${upload}/><button class="btn small" disabled=${uploading} onClick=${()=>picker.current.click()}>${uploading?'Загружаю…':'Прикрепить'}</button><${VoiceControls} sid=${sid} onTranscript=${setText} onAttachment=${item=>setFiles(current=>[...current,item])}/><div class="composer-inner">
-      <${AutoTextarea} value=${text} onInput=${setText} placeholder=${running ? "Написать во время работы — вставлю в идущий ход" : "Сообщение…"}
+      <${AutoTextarea} value=${text} onInput=${setText} placeholder=${running ? RUNNING_HINT[mode] : "Сообщение…"}
         onKeyDown=${(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.innerWidth >= 700) { e.preventDefault(); send(); } }} />
+      <select class=${`select delivery-mode${running ? " live" : ""}`} aria-label="Новое сообщение во время хода" value=${mode} onChange=${(e) => setMode(e.target.value)}
+        title=${"Новое сообщение во время хода: " + DELIVERY.find((d) => d[0] === mode)?.[2] + ". Разово — кнопки у ждущего сообщения." + (st?.new_message_engine ? " " + st.new_message_engine : "")}>
+        ${DELIVERY.map(([value, label]) => html`<option value=${value}>${label}</option>`)}</select>
       ${running ? html`<${IconButton} icon="stop" title="Остановить ход" danger onClick=${stop} />` : null}
       <${Button} kind="primary" icon="send" onClick=${send} disabled=${uploading||(!text.trim()&&!files.length)} title="Отправить"></${Button}>
     </div></div>`}

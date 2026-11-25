@@ -98,7 +98,8 @@ class Topics:
         if thread is None and msg.get('is_topic_message'):
             # При потерянном номере используем только известный ответ, не «последнюю тему».
             reply=msg.get('reply_to_message') or {}
-            route=self.host.store.meta_get('telegram:message_routes',{}).get(str(chat)+':'+str(reply.get('message_id')), {})
+            from .telegram_refs import route as known_route
+            route=known_route(self.host,chat,reply.get('message_id')) or {}
             if route:
                 try:known=self.for_session(self.host.agents.get(route['agent']),route['session'])
                 except HumanError:known=None

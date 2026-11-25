@@ -119,6 +119,26 @@ class TelegramLiveTest(TempDirCase):
             self.assertEqual(len(self.sent(env,'deleteMessage')),1)
             self.assertNotIn('RAW-UNTRUSTED',str(attempts))
             self.assertEqual(len([m for m,p in attempts if m=='sendMessageDraft']),1)
+            order=[m for m,p in attempts if m=='deleteMessage' or (m=='sendMessage' and p.get('text')=='Финал')]
+            self.assertEqual(order,['sendMessage','deleteMessage'])  # ответ виден раньше: статус убирается после него
+
+    def test_slow_answer_names_longest_stage(self):
+        from types import SimpleNamespace
+        from bender.channels import telegram as tgmod
+        from bender.channels.telegram_ops import timing_lines
+        written=[]
+        app=SimpleNamespace(agent_id='main',journal=SimpleNamespace(write=lambda kind,text,**kw:written.append(text)))
+        tg=SimpleNamespace(app=app,timing=__import__('collections').deque(maxlen=20))
+        now=__import__('time').monotonic()
+        fast=SimpleNamespace(t_got=now-1.0,t_live=now-0.9,t_model=now-0.5,t_text=now-0.4)
+        tgmod.Telegram._timed(tg,fast)
+        self.assertEqual(written,[])
+        slow=SimpleNamespace(t_got=now-14.0,t_live=now-13.9,t_model=now-1.5,t_text=now-1.0)
+        tgmod.Telegram._timed(tg,slow)
+        self.assertEqual(len(written),1)
+        self.assertIn('модель молчала до первого слова (12,4 с)',written[0])
+        self.assertIn('ответ через 14,0 с',written[0])
+        self.assertIn('модель до первого слова',timing_lines(tg)[0])
 
     @async_test
     async def test_429_defers_updates_and_final_stop_button_checks_chat_and_id(self):

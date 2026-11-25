@@ -152,10 +152,16 @@ class Groups:
                     self.tg._bg_task(self.member_turn(ident,sender,msg,text))
                     return None
             if self.policy(ident).get('context'):
+                from .telegram_forward import clean_name,origin,source
                 key='telegram:group_context:'+str(ident)
                 context=self.host.store.meta_get(key,[])
-                context.append({'from':sender.get('id'),'name':str(sender.get('first_name') or '')[:80],
-                    'text':str(rich_body(msg) or '[вложение участника]')[:4000],'message':msg.get('message_id')})
+                # Пост канала в группе обсуждения и анонимный админ пишут от имени чата (sender_chat), а не человека.
+                speaker=msg.get('sender_chat') if isinstance(msg.get('sender_chat'),dict) else {}
+                text=str(rich_body(msg) or '[вложение участника]')[:4000]
+                info=origin(msg,owner.get('user_id'),(self.tg.me or {}).get('id'))
+                if info:text='[переслано: '+source([info])+'] '+text
+                context.append({'from':sender.get('id'),'name':clean_name(speaker.get('title') or sender.get('first_name') or '',80),
+                    'text':text,'message':msg.get('message_id')})
                 self.host.store.meta_set(key,context[-20:])
             return None
         username=(self.tg.me or {}).get('username')

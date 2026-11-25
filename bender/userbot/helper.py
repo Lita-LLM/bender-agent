@@ -75,6 +75,22 @@ def media_info(m):
     return info
 
 
+def forward_info(m):
+    """Откуда пересланное: имя/чат из кэша Telethon (без запросов), дата, пост и подпись. False — не пересланное."""
+    f = m.forward
+    if not f:
+        return False
+    try:
+        entity = getattr(f, 'sender', None) or getattr(f, 'chat', None)
+        who = person(entity) if entity is not None else None
+        date = getattr(f, 'date', None)
+        return {'name': (who or {}).get('name') or getattr(f, 'from_name', None) or '', 'username': (who or {}).get('username') or '',
+                'id': (who or {}).get('id'), 'channel': bool(getattr(f, 'is_channel', False)), 'post': getattr(f, 'channel_post', None),
+                'signature': getattr(f, 'post_author', None) or '', 'date': date.timestamp() if date else None}
+    except Exception:  # noqa: BLE001 — подробности пересылки не должны ронять разбор сообщения
+        return {'name': '', 'date': None}
+
+
 async def msg_info(m, chat=None):
     if chat is None:
         chat = await m.get_chat()
@@ -84,7 +100,7 @@ async def msg_info(m, chat=None):
         text = '[служебное: ' + type(m.action).__name__.replace('MessageAction', '') + ']'
     return {'id': m.id, 'chat': chat_info(chat), 'sender': person(sender) or chat_info(chat), 'text': text, 'date': m.date.timestamp() if m.date else 0, 'out': bool(m.out),
             'reply_to': m.reply_to_msg_id, 'mentioned': bool(m.mentioned), 'media': media_info(m), 'edited': bool(m.edit_date), 'group': m.grouped_id,
-            'forward': bool(m.forward), 'service': m.action is not None}
+            'forward': forward_info(m), 'service': m.action is not None}
 
 
 async def resolve(ref):

@@ -156,8 +156,36 @@ def collect(root,*,app=None):
     add('slots','ok' if slot_ok else 'error','Слоты версий','Откатись к прежнему целому слоту.' if not slot_ok else '',pending=bool(slots.get('pending')),has_previous=bool(slots.get('previous')))
     metrics=process_metrics(root,live=app is not None)
     add('process','ok' if metrics.get('running') else 'warn','Память и диск процесса','Сравни показатели сейчас и после суток работы.' if metrics.get('running') else 'Процесс не найден; запусти Бендера и повтори doctor.',**metrics)
+    load_row(add,root,settings,app)
     if reader:reader.close()
     return {'format':1,'version':__version__,'rows':rows,'ok':not any(row['level']=='error' for row in rows),'data':str(root)}
+
+
+def load_row(add,root,settings,app):
+    """Нагрузка — только числа и переключатели: имена процессов, виновник и причины — в пульте (Тело) и local/load."""
+    enabled=settings.get('load','enabled',True) is not False
+    try:reports=sorted((root/'local'/'load').glob('*.json'))
+    except OSError:reports=[]
+    details={'enabled':enabled,'reports':len(reports)}
+    try:
+        if reports:details['last']=reports[-1].stat().st_mtime
+    except OSError:pass
+    watch=getattr(app,'_load_watch',None) if app is not None else None
+    level,title,action='ok','Нагрузка: обычная',''
+    if not enabled:
+        title,action='Нагрузка: анализ выключен','Включи в Настройках → Нагрузка, чтобы узнать, кто грузит узел, если он снова уйдёт в 100%.'
+    elif watch is not None:
+        now=watch.brief()
+        for key,name in (('own','own_pct'),('own_5m','own_5m_pct'),('sys','sys_pct'),('load1','load1'),('mem','mem_free_pct'),('lag','lag')):
+            if isinstance(now.get(key),(int,float)) and not isinstance(now.get(key),bool):details[name]=now[key]
+        details['samples']=len(watch.samples)
+        recent=[a for a in list(watch.anomalies) if time.time()-a['started']<3600]
+        details['anomalies']=len(recent)
+        if now.get('active'):level,title,action='warn','Нагрузка: необычная сейчас','Подробности — Тело → Нагрузка или /load в Telegram.'
+        elif recent:level,title,action='warn','Нагрузка: была необычная за час','Отчёт — Тело → Нагрузка или /load report в Telegram.'
+    elif reports and time.time()-details.get('last',0)<86400:
+        level,title,action='warn','Нагрузка: была необычная за сутки','Отчёт — local/load в папке данных или /load report в Telegram.'
+    add('load',level,title,action,**details)
 
 
 def vision_row(add,settings,roles,providers):

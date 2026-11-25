@@ -48,10 +48,15 @@ def register(reg) -> None:
             task = ctx.app.team.get(tid)
             if not task or task.get("parent_session") != ctx.session_id:
                 raise HumanError("team_scope", "Можно ждать только своих субагентов", "Используй id из своего spawn_task.")
-        res = await ctx.app.team.wait(list(ids or []), timeout, session_id=ctx.session_id, background_lease=ctx.turn.get('_background_lease'))
+        from ..mind import steer
+        nudge = steer.event(ctx.turn)
+        res = await ctx.app.team.wait(list(ids or []), timeout, session_id=ctx.session_id, background_lease=ctx.turn.get('_background_lease'), steer=nudge)
         if not res:
             return ToolResult("Нет таких задач.", ok=False, summary="нет задач")
         parts, tainted = [], False
+        if nudge is not None and nudge.is_set() and any(t.get("waiting") for t in res):
+            parts.append("[Ожидание прервано: пришло новое сообщение хозяина — прочитай его на следующем шаге. Помощники работают дальше; "
+                         "итог придёт отдельным сообщением, или дождись снова wait_tasks.]")
         for t in res:
             if t.get("waiting"):
                 parts.append(f"## #{t['id'][-6:]} — ещё работает")

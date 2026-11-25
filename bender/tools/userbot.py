@@ -65,7 +65,16 @@ def line(m):
     media = m.get('media') or {}
     extra = (' [' + str(media.get('kind')) + (' ' + str(media.get('name') or media.get('emoji') or media.get('question') or '')).rstrip() + ']') if media else ''
     return ('#' + str(m.get('id')) + ' · ' + stamp(m.get('date')) + ' · ' + ('я' if m.get('out') else str(sender.get('name') or sender.get('id')))
-            + (' · ответ на #' + str(m['reply_to']) if m.get('reply_to') else '') + (' · правка' if m.get('edited') else '') + ': ' + str(m.get('text') or '') + extra)
+            + (' · ответ на #' + str(m['reply_to']) if m.get('reply_to') else '') + (' · правка' if m.get('edited') else '') + forwarded(m) + ': ' + str(m.get('text') or '') + extra)
+
+
+def forwarded(m):
+    """« · переслано · от: … · написано …» (строка уже внутри недоверенной рамки чата)."""
+    if not m.get('forward'):
+        return ''
+    from ..channels.telegram_forward import from_userbot, source
+    line = source([from_userbot(m['forward'])])
+    return ' · переслано' + (' · ' + line if line else '')
 
 
 async def attachments(ctx, paths):

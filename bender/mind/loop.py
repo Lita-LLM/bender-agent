@@ -4,8 +4,9 @@
 закрыться, ответ всё равно допишется и сохранится. Остановка и ошибка сохраняют то, что
 успело прийти.
 
-Сообщения хозяина, пришедшие во время хода, не ждут его конца: они вставляются в идущий
-ход на ближайшей границе тула («стой, не туда»).
+Сообщение хозяина, пришедшее во время хода, доставляется по его выбору (steer.py, agent.new_message):
+вставляется в идущий ход на ближайшем шаге («стой, не туда») — ждущие тулы возвращаются раньше, не начатые
+вызовы пакета не выполняются; прерывает ход и сразу начинает новый; или ждёт конца хода и начинает следующий.
 
 Лимиты: шаги с тулами, время, деньги на ход. Детектор петель: один и тот же вызов с теми
 же аргументами и результатами трижды, включая чередование двух — остановка с объяснением.
@@ -27,6 +28,7 @@ from ..tools.registry import ToolContext
 from . import compact
 from . import context as ctxmod
 from . import review as reviewmod
+from . import steer
 
 
 # Кто может начать ход, не заражая его: хозяин и задача по расписанию (её текст поставил хозяин или
@@ -59,6 +61,10 @@ class Turn:
     context: object | None = None  # исполняющий контекст; API имеет свой потолок на тех же данных
     skill: dict | None = None  # текущий выбор хозяина; тело навыка не сохраняется в истории
 
+    def __post_init__(self):
+        # Слово хозяина ждёт вставки: ждущие тулы видят событие через ctx.turn и возвращаются раньше (steer.py).
+        self.state.setdefault('_steer', asyncio.Event())
+
 
 def home_channel(agent_ctx, sid: str) -> str:
     """Куда отвечать хозяину; внутренний источник не меняет адрес разговора."""
@@ -69,6 +75,7 @@ class Mind:
     def __init__(self, agent_ctx):
         self.app = agent_ctx
         self.turns: dict[str, Turn] = {}
+        self.queued: dict[str, list] = {}  # «после хода»: слова хозяина, которые модель увидит только новым ходом
         self.background: set[asyncio.Task] = set()  # сжатие и разбор после ходов
         self._after_lock = asyncio.Lock()
 
@@ -84,8 +91,14 @@ class Mind:
 
     async def say(self, session_id: str, text: str, *, channel: str = "pult", actor: str = "owner", content=None, unattended: bool = False,
                   wait: bool = True, tainted: bool | None = None, system: str | None = None, model_role: str = "main",
-                  tool_names: tuple | None = None, limits: dict | None = None, label: str = "", agent_chain=None, agent_letter='', message_meta=None, attended: bool = False, effort: str | None = None) -> dict | None:
-        """Сообщение в сессию. Идёт ход — вставится в него; нет — начнётся новый ход."""
+                  tool_names: tuple | None = None, limits: dict | None = None, label: str = "", agent_chain=None, agent_letter='', message_meta=None, attended: bool = False, effort: str | None = None,
+                  delivery: str | None = None, urgent: bool = False) -> dict | None:
+        """Сообщение в сессию. Нет хода — начнётся новый. Идёт ход — слово хозяина из его канала доставляется
+        по режиму agent.new_message или разовому delivery (insert | interrupt | queue); остальное вставляется в ход.
+        Вставленное и отложенное возвращают None: ответ придёт событием answer в конце хода.
+        urgent — безлюдный ход по перегрузке (заведующий узлом): не ждёт, пока цикл успокоится, см. Agents.background."""
+        if delivery is not None and steer.normalize(delivery) is None:
+            raise HumanError('delivery', 'Непонятный режим доставки', 'insert — вставить в ход, interrupt — прервать, queue — после хода.')
         if isinstance(content,list) and any(isinstance(part,dict) and part.get('type') in ('image','audio') for part in content):tainted=True
         if getattr(self.app.host,'_draining',False):raise HumanError('closing','Бендер завершает работу','Дождись перезапуска или запусти его снова; новый ход не начат.',status=409)
         if getattr(self.app,'_importing',False):raise HumanError('import_busy','Агент сейчас переезжает','Дождись завершения переноса.')
@@ -108,11 +121,8 @@ class Mind:
             text = take(self.app.host, self.app.agent_id, home) + text  # первая реплика после hand_over
         route=(message_meta or {}).get('telegram_route') if channel=='telegram' else None
         requested=(message_meta or {}).get('telegram_owner_requested') if channel=='telegram' and actor=='owner' else None
-        if t and t.task and not t.task.done() and route:
-            t.state['_telegram_route']=dict(route)
-            t.state['_telegram_owner_requested']=requested
-        if t and t.task and not t.task.done() and label:
-            t.state["delivery_label"] = label
+        # Сообщение пришло цитатой не выбранному агенту — ответ хода цитатой на него; решает последнее сообщение хода.
+        reply_to=(message_meta or {}).get('telegram_reply_to') if channel=='telegram' and actor=='owner' else None
         if actor=='owner' and not tainted and home in ('pult','terminal','matrix') and text.strip().split(maxsplit=1)[0:1]==['/effort']:
             from ..router.effort import command
             parts=text.strip().split(maxsplit=1)
@@ -151,14 +161,38 @@ class Mind:
             meta["clean_letter"] = True
         if (actor not in TRUSTED_ACTORS and not clean_letter) or tainted:
             meta["untrusted"] = True
-        if t and t.task and not t.task.done():
+        how = self.delivery(session_id, channel, actor, delivery) if t and t.task and not t.task.done() else None
+        if how == 'interrupt':
+            # Как «Стоп» этого хода (не стоп-кран): открытые вызовы получают результат «прервано хозяином»,
+            # затем — новый ход с этим словом. Параллельное слово успело начать новый ход — встаём в него.
+            await self.interrupt(session_id)
+            t = self.turns.get(session_id)
+            how = 'insert' if t and t.task and not t.task.done() else None
+            meta['delivery'] = 'interrupt'
+        if how == 'queue':
+            from ..core.ids import new_id
+            meta.update(delivery='queue', pending=new_id())
+            self.queued.setdefault(session_id, []).append({'msg': msg, 'meta': meta, 'route': route, 'requested': requested, 'reply_to': reply_to,
+                                                         'label': label, 'agent_chain': list(agent_chain or []), 'agent_letter': agent_letter})
+            self.publish(session_id, {"type": "message", "message": {**msg, "meta": {**meta, "queued": True}}})
+            self._pending_changed(session_id)
+            return None
+        if how == 'insert':
+            self._join(t, route, requested, reply_to, label)
             if agent_chain and len(agent_chain)>=len(t.state.get('agent_chain') or []):
                 t.state.update(agent_chain=list(agent_chain),agent_letter=agent_letter)
+            if steer.applies(channel, actor):
+                from ..core.ids import new_id
+                meta.update(delivery='insert', pending=new_id())
+                ev = steer.event(t.state)
+                if ev is not None:
+                    ev.set()  # ждущие тулы возвращаются раньше, не начатые вызовы пакета не выполняются
             # идёт ход: сообщение ляжет в историю на ближайшей границе тула (между вызовом тула и его
             # результатом вставлять нельзя — провайдеры требуют, чтобы результат шёл сразу за вызовом)
             t.inbox.append((msg, meta))
             self.publish(session_id, {"type": "message", "message": {**msg, "meta": {**meta, "queued": True}}})
             self.publish(session_id, {"type": "steer", "text": text[:200]})
+            self._pending_changed(session_id)
             return None
         if actor == "owner" and session_id == self.app.main_session():
             from . import compact
@@ -176,13 +210,127 @@ class Mind:
         self.turns[session_id] = turn
         turn.state["delivery_label"] = label
         if effort: turn.state["_effort"] = effort  # усилие только этого хода (например, ответ в колонку)
+        if urgent and unattended: turn.state["_urgent"] = True
         if route:turn.state['_telegram_route']=dict(route)
         if requested is not None:turn.state['_telegram_owner_requested']=requested
+        if reply_to:turn.state['_telegram_reply_to']=reply_to
         if agent_chain:turn.state.update(agent_chain=list(agent_chain),agent_letter=agent_letter)
         self._launch(turn)
         if wait:
             async with self.app.host.agents.pause_background():return await turn.task
         return None
+
+    # доставка слова хозяина, пришедшего во время хода (steer.py)
+
+    def delivery(self, session_id: str, channel: str = 'pult', actor: str = 'owner', override: str | None = None) -> str:
+        """Как будет доставлено слово хозяина, если ход идёт: insert | interrupt | queue."""
+        if not steer.applies(channel, actor):
+            return 'insert'
+        return steer.normalize(override) or steer.default(self.app)
+
+    @staticmethod
+    def _join(t: Turn, route, requested, reply_to, label) -> None:
+        """Вставленное слово меняет адрес ответа идущего хода: ответ придёт туда, откуда хозяин написал последним."""
+        if route:
+            t.state['_telegram_route'] = dict(route)
+            t.state['_telegram_owner_requested'] = requested
+            t.state['_telegram_reply_to'] = reply_to
+        if label:
+            t.state["delivery_label"] = label
+
+    def pending(self, session_id: str) -> dict:
+        """Слова хозяина идущего хода, которые модель ещё не видела: сколько вставится и сколько ждёт конца."""
+        t = self.turns.get(session_id)
+        if not t or not t.task or t.task.done():
+            return {'insert': 0, 'queue': 0, 'running': False}
+        inserts = [m for _, m in t.inbox if m.get('delivery') == 'insert']
+        return {'insert': len(inserts), 'queue': len(self.queued.get(session_id) or []), 'running': True,
+                'items': [{'pending': m.get('pending'), 'delivery': 'insert', 'telegram_message_id': m.get('telegram_message_id')} for m in inserts]
+                + [{'pending': e['meta'].get('pending'), 'delivery': 'queue', 'telegram_message_id': e['meta'].get('telegram_message_id')} for e in self.queued.get(session_id) or []]}
+
+    def pending_delivery(self, session_id: str, telegram_message_id) -> str | None:
+        """insert | queue — где сейчас ждёт сообщение Telegram с этим номером (для реакции под ним)."""
+        for item in self.pending(session_id).get('items', []):
+            if telegram_message_id is not None and item.get('telegram_message_id') == telegram_message_id:
+                return item['delivery']
+        return None
+
+    def _pending_changed(self, session_id: str) -> None:
+        state = self.pending(session_id)
+        self.publish(session_id, {'type': 'pending', 'insert': state['insert'], 'queue': state['queue'],
+                                  'items': [{k: v for k, v in item.items() if k != 'telegram_message_id'} for item in state.get('items', [])]})
+
+    def _recount_steer(self, t: Turn) -> None:
+        ev = steer.event(t.state)
+        if ev is None:
+            return
+        if any(m.get('delivery') == 'insert' for _, m in t.inbox):
+            ev.set()
+        else:
+            ev.clear()
+
+    async def interrupt(self, session_id: str, reason: str = 'Ход прерван: хозяин написал новое сообщение.') -> bool:
+        """Отменить идущий ход и дождаться его завершения: история остаётся парной, вставленное — в истории."""
+        t = self.turns.get(session_id)
+        if not t or not t.task or t.task.done():
+            return False
+        t.stopped = True
+        t.state['_interrupted'] = reason
+        t.task.cancel()
+        await asyncio.wait({t.task})
+        return True
+
+    async def redeliver(self, session_id: str, mode: str) -> int:
+        """Сменить доставку слов хозяина, ещё не увиденных моделью (кнопки у ждущего сообщения, /delivery).
+        Возвращает, сколько сообщений затронуто."""
+        mode = steer.normalize(mode)
+        if mode is None:
+            raise HumanError('delivery', 'Непонятный режим доставки', 'insert — вставить в ход, interrupt — прервать, queue — после хода.')
+        t = self.turns.get(session_id)
+        if not t or not t.task or t.task.done():
+            return 0
+        inserted = [(msg, meta) for msg, meta in t.inbox if meta.get('delivery') == 'insert']
+        queued = list(self.queued.get(session_id) or [])
+        moved = []
+        if mode == 'queue' and inserted:
+            t.inbox[:] = [item for item in t.inbox if item[1].get('delivery') != 'insert']
+            for msg, meta in inserted:
+                meta['delivery'] = 'queue'
+                self.queued.setdefault(session_id, []).append({'msg': msg, 'meta': meta, 'route': None, 'requested': None, 'reply_to': None, 'label': '', 'agent_chain': [], 'agent_letter': ''})
+                moved.append(meta)
+        elif mode == 'insert' and queued:
+            self.queued.pop(session_id, None)
+            for entry in queued:
+                entry['meta']['delivery'] = 'insert'
+                self._join(t, entry['route'], entry['requested'], entry['reply_to'], entry['label'])
+                t.inbox.append((entry['msg'], entry['meta']))
+                moved.append(entry['meta'])
+        elif mode == 'interrupt' and (inserted or queued):
+            moved = [meta for _, meta in inserted] + [entry['meta'] for entry in queued]
+            for meta in moved:
+                meta['delivery'] = 'interrupt'
+            last = self.app.store.one("SELECT MAX(id) AS id FROM messages WHERE session_id=?", (session_id,))
+            # Вставленное и отложенное ляжет в историю при завершении хода; новый ход начнётся с них.
+            await self.interrupt(session_id)
+            for meta in moved:
+                self.publish(session_id, {'type': 'pending_moved', 'pending': meta.get('pending'), 'delivery': 'interrupt'})
+            await self._resume(t, last['id'] if last else None, moved[-1])
+            return len(moved)
+        self._recount_steer(t)
+        for meta in moved:
+            self.publish(session_id, {'type': 'pending_moved', 'pending': meta.get('pending'), 'delivery': mode})
+        self._pending_changed(session_id)
+        return len(moved)
+
+    def _take_queue(self, turn: Turn) -> list:
+        """Конец хода: отложенные слова хозяина — в историю (по порядку), модель увидит их новым ходом."""
+        entries = self.queued.pop(turn.session_id, None) or []
+        for entry in entries:
+            mid = self.app.store.add_message(turn.session_id, entry['msg'], entry['meta'])
+            self.publish(turn.session_id, {'type': 'message_delivered', 'pending': entry['meta'].get('pending'), 'id': mid, 'delivery': 'queue'})
+        if entries:
+            self._pending_changed(turn.session_id)
+        return entries
 
     def _launch(self, turn: Turn) -> None:
         session_id = turn.session_id
@@ -192,8 +340,9 @@ class Mind:
                 self.turns.pop(session_id, None)
         turn.task.add_done_callback(release)
 
-    async def _resume(self, turn: Turn, after_id, meta: dict) -> None:
-        """Слово хозяина пришло, когда ход уже заканчивался (лимит шагов, срока, петля): оно в истории — отвечаем новым ходом."""
+    async def _resume(self, turn: Turn, after_id, meta: dict, entry: dict | None = None) -> None:
+        """Слово хозяина пришло, когда ход уже заканчивался (лимит шагов, срока, петля), ждало конца хода
+        («после хода») или прервало ход: оно в истории — отвечаем новым ходом."""
         await asyncio.sleep(0)
         sid = turn.session_id
         if self.running(sid) or self.app.guard.halted or getattr(self.app.host, '_draining', False) or getattr(self.app, '_closed', False):
@@ -203,8 +352,12 @@ class Mind:
             return
         tainted = any(json.loads(r['meta'] or '{}').get('untrusted') for r in rows)
         new = Turn(sid, meta.get('channel') or turn.channel, 'owner', False, tainted=tainted, first_id=rows[0]['id'], skill=meta.get('skill'), context=self.app)
-        for key in ('delivery_label', '_telegram_route', '_telegram_owner_requested'):
+        for key in ('delivery_label', '_telegram_route', '_telegram_owner_requested', '_telegram_reply_to'):
             if key in turn.state:new.state[key] = turn.state[key]
+        if entry:  # отложенное слово несёт свой адрес ответа (Telegram, цитата, подпись)
+            self._join(new, entry.get('route'), entry.get('requested'), entry.get('reply_to'), entry.get('label'))
+            if entry.get('agent_chain'):
+                new.state.update(agent_chain=list(entry['agent_chain']), agent_letter=entry.get('agent_letter', ''))
         self.app.store.update_session(sid, meta={"active_turn": {"first": new.first_id, "channel": new.channel}})
         self.turns[sid] = new
         self._launch(new)
@@ -257,7 +410,7 @@ class Mind:
         slot = None
         try:
             if turn.unattended:
-                lane = agent_ctx.host.agents.background()
+                lane = agent_ctx.host.agents.background(urgent=bool(turn.state.get('_urgent')))
                 await lane.__aenter__()
                 turn.started = time.monotonic()  # срок безлюдного хода — с момента, как ему досталось место (A36)
                 slot = lane
@@ -270,8 +423,9 @@ class Mind:
             result['text'] = turn.state.get('last_text', '')
             result['error'] = {'code': 'turn_timeout', 'title': 'Достигнут срок хода'}
         except asyncio.CancelledError:
-            self._save_event(sid, "stopped", "Ход остановлен.")
-            result["error"] = {"code": "stopped", "title": "Ход остановлен"}
+            interrupted = turn.state.get('_interrupted')
+            self._save_event(sid, "stopped", interrupted or "Ход остановлен.")
+            result["error"] = {"code": "stopped", "title": "Ход прерван новым сообщением" if interrupted else "Ход остановлен"}
         except Halted as e:
             self._save_event(sid, "halt", e.title)
             result["error"] = e.to_dict()
@@ -288,7 +442,7 @@ class Mind:
             if slot is not None: await slot.__aexit__(None, None, None)
             turn.state.pop('_background_lease',None)
             self._finish_pending(turn)
-            self._flush_inbox(turn)
+            self._flush_inbox(turn, mid_turn=False)
             pending = turn.state.pop('_owner_pending', None)  # слово хозяина, которое модель ещё не видела
             resume = (pending['after'], pending['meta']) if pending and not turn.stopped and turn.system is None and not agent_ctx.guard.halted else None
             agent_ctx.guard.end_turn(sid)
@@ -301,6 +455,8 @@ class Mind:
             result["tainted"] = turn.tainted
             result['telegram_route']=turn.state.get('_telegram_route')
             result['telegram_owner_requested']=turn.state.get('_telegram_owner_requested')
+            # Слово, которого модель не видела (ответит следующий ход), этим ответом не цитируется.
+            result['telegram_reply_to']=None if pending else turn.state.get('_telegram_reply_to')
             result["sent_all"] = bool(turn.state.get("sent_all"))
             result["channel_sent"] = turn.state.get("channel_sent",[])[-3:]
             if turn.state.get('_denied') and turn.system is None:
@@ -309,6 +465,13 @@ class Mind:
                 self._spawn(self._report_denied(turn, result['denied'], len(turn.state['_denied'])))
             last = agent_ctx.store.one("SELECT MAX(id) AS id FROM messages WHERE session_id=?", (sid,))
             agent_ctx.store.update_session(sid, meta={"active_turn":None, "last_turn": {"first": turn.first_id, "last": last["id"], "tainted": turn.tainted}})
+            # «После хода»: отложенные слова — в историю сейчас (до turn_end: пульт перечитает историю уже с ними)
+            # и новым ходом; после Стопа — только в историю, ход не начинается.
+            later = self._take_queue(turn)
+            if later and turn.stopped and not turn.state.get('_interrupted'):
+                self._save_event(sid, 'notice', f'Сообщений «после хода»: {len(later)} — в истории, новый ход не начат: ход остановлен. Напиши, чтобы продолжить.')
+            elif later and not agent_ctx.guard.halted:
+                resume = (resume[0] if resume else last["id"], later[-1]['meta'], later[-1])
             if turn.actor == "owner" and agent_ctx.settings.get("workshop", "enabled", True) and agent_ctx.settings.get("workshop", "metrics", True):
                 error = result.get("error") or {}
                 agent_ctx.journal.write("turn", "Ход хозяина: " + ("без ошибки" if not error and not turn.state.get("tool_failed") else "ошибка или отмена"), actor="owner",
@@ -326,7 +489,7 @@ class Mind:
 
     async def _report_denied(self, turn: Turn, denied: list, total: int) -> None:
         from .notices import home
-        where = {'heart': 'по расписанию', 'schedule': 'по расписанию', 'hook': 'по вебхуку', 'mail': 'по письму'}.get(turn.actor, turn.channel)
+        where = 'разбор нагрузки узла' if turn.channel == 'node' else {'heart': 'по расписанию', 'schedule': 'по расписанию', 'hook': 'по вебхуку', 'mail': 'по письму'}.get(turn.actor, turn.channel)
         lines = '\n'.join('• ' + d['tool'] + ': ' + d['reason'] for d in denied) + (f'\n… и ещё {total - len(denied)}' if total > len(denied) else '')
         text = (f'⚠️ Ход без хозяина ({where}): Предохранитель не дал сделать —\n{lines}\n'
                 'Эта часть не выполнена. Повтори в разговоре со мной или разреши правилом хозяина.')
@@ -385,9 +548,10 @@ class Mind:
             if agent_ctx.vectors.available():
                 await agent_ctx.vectors.fill()  # векторы для нового (в том числе только что запомненного)
 
-    def observe(self,sid,text,*,channel='telegram',tainted=False,continue_turn=False,meta=None):
-        """Служебный факт без нового хода; вставляется только между полными пакетами тулов."""
-        msg={'role':'user','content':text}
+    def observe(self,sid,text,*,channel='telegram',tainted=False,continue_turn=False,meta=None,content=None):
+        """Служебный факт без нового хода; вставляется только между полными пакетами тулов.
+        content — части для модели (текст и картинки), например заменённое вложение."""
+        msg={'role':'user','content':content if content is not None else text}
         info={**(meta or {}),'service_event':True,'actor':'system','channel':channel,'untrusted':bool(tainted),'continue_turn':bool(continue_turn)}
         turn=self.turns.get(sid)
         if turn and turn.task and not turn.task.done():
@@ -396,10 +560,41 @@ class Mind:
         else:self.app.store.add_message(sid,msg,info)
         self.publish(sid,{'type':'message','message':{**msg,'meta':info}})
 
-    def _flush_inbox(self, turn: Turn) -> bool:
+    def amend_queued(self, sid, match, change) -> bool:
+        """Поправить сообщение, которое ещё ждёт в очереди идущего хода: модель его не видела, поэтому
+        вместо второй строки «было → стало» правится сама запись (история, отданная модели, не переписывается).
+        match(msg, meta) выбирает запись; change(msg, meta) возвращает (msg, meta) или None — не править."""
+        turn = self.turns.get(sid)
+        if not turn or not turn.task or turn.task.done():
+            return False
+        for index, (msg, meta) in enumerate(turn.inbox):
+            if meta.get('service_event') or not match(msg, meta):
+                continue
+            changed = change(dict(msg), dict(meta))
+            if not changed:
+                return False
+            turn.inbox[index] = changed
+            msg, meta = changed
+            self.publish(sid, {'type': 'message_amended', 'message': {**msg, 'meta': {**meta, 'queued': True}}})
+            return True
+        for entry in self.queued.get(sid) or []:  # «после хода» — модель его тоже ещё не видела
+            if not match(entry['msg'], entry['meta']):
+                continue
+            changed = change(dict(entry['msg']), dict(entry['meta']))
+            if not changed:
+                return False
+            entry['msg'], entry['meta'] = changed
+            self.publish(sid, {'type': 'message_amended', 'message': {**entry['msg'], 'meta': {**entry['meta'], 'queued': True}}})
+            return True
+        return False
+
+    def _flush_inbox(self, turn: Turn, *, mid_turn: bool = True) -> bool:
+        """Вставить ждущее в историю на границе шага. mid_turn — модель увидит это посреди своего хода
+        (метка steer.MARK у реплики хозяина); в конце хода — нет: ответит следующий ход."""
         if not turn.inbox:
             return False
         work=False
+        delivered = []
         for msg, meta in turn.inbox:
             work=work or not meta.get('service_event') or bool(meta.get('continue_turn'))
             if meta.get("untrusted") or (not meta.get('service_event') and not meta.get('clean_letter') and meta.get("actor") not in TRUSTED_ACTORS):
@@ -409,8 +604,19 @@ class Mind:
             if meta.get('actor') == 'owner' and not meta.get('service_event'):
                 pending = turn.state.setdefault('_owner_pending', {'after': (self.app.store.one("SELECT MAX(id) AS id FROM messages WHERE session_id=?", (turn.session_id,)) or {})['id']})
                 pending['meta'] = meta
-            self.app.store.add_message(turn.session_id, msg, meta)
+            if meta.get('delivery') == 'insert' and mid_turn:
+                meta = {**meta, 'mid_turn': True}
+            mid = self.app.store.add_message(turn.session_id, msg, meta)
+            if meta.get('pending'):
+                delivered.append({'pending': meta['pending'], 'id': mid, 'delivery': meta.get('delivery'), 'mid_turn': bool(meta.get('mid_turn')), 'step': turn.steps})
         turn.inbox.clear()
+        ev = steer.event(turn.state)
+        if ev is not None:
+            ev.clear()
+        for item in delivered:
+            self.publish(turn.session_id, {'type': 'message_delivered', **item})
+        if delivered:
+            self._pending_changed(turn.session_id)
         if work:
             turn.seen_calls.clear()
             turn.state.pop('loop_detected', None)
@@ -432,11 +638,15 @@ class Mind:
         calls = json.loads(row['data']).get('tool_calls') or []
         if not calls: return
         done = {json.loads(r['data']).get('tool_call_id') for r in agent_ctx.store.q("SELECT data FROM messages WHERE session_id=? AND id>? AND role='tool'", (sid, row['id']))}
+        by_owner = bool(turn.state.get('_interrupted'))
+        text = ('Прервано хозяином: он написал новое сообщение. Вызов не завершён — проверь результат перед повтором.' if by_owner
+                else 'Вызов прерван остановкой или сроком хода.')
+        summary = 'прервано хозяином' if by_owner else 'прервано'
         for call in calls:
             if call.get('id') in done: continue
-            msg = {'role':'tool', 'tool_call_id':call.get('id'), 'name':call.get('name'), 'content':'Вызов прерван остановкой или сроком хода.', 'is_error':True}
-            agent_ctx.store.add_message(sid, msg, {'ok':False, 'summary':'прервано'})
-            self.publish(sid, {'type':'tool_end', 'id':call.get('id'), 'name':call.get('name'), 'ok':False, 'summary':'прервано'})
+            msg = {'role':'tool', 'tool_call_id':call.get('id'), 'name':call.get('name'), 'content':text, 'is_error':True}
+            agent_ctx.store.add_message(sid, msg, {'ok':False, 'summary':summary})
+            self.publish(sid, {'type':'tool_end', 'id':call.get('id'), 'name':call.get('name'), 'ok':False, 'summary':summary})
 
     def _limits(self, turn):
         s = self.app.settings.group('agent')
@@ -599,6 +809,9 @@ class Mind:
                 key = (call.name, json.dumps(call.arguments, sort_keys=True, ensure_ascii=False))
                 if turn.state.get('loop_detected'):
                     out_text, ok, summary, tainted, data = ('Вызов отменён: обнаружена петля в этом пакете.', False, 'петля', False, {})
+                elif steer.pending(turn.state):
+                    # Вставка: слово хозяина важнее ещё не начатых вызовов этого пакета («стой, не туда»).
+                    out_text, ok, summary, tainted, data = ('Не выполнено: ' + steer.READ_FIRST + ' этот вызов.', False, 'не начат: слово хозяина', False, {'steered': True})
                 elif turn.tool_names is not None and call.name not in turn.tool_names:
                     out_text, ok, summary, tainted, data = (f"Ошибка: тул «{call.name}» тебе не выдан. Доступны: {', '.join(turn.tool_names) or 'никакие'}.", False, "тул не выдан", False, {})
                 elif call.bad_json:
@@ -611,7 +824,7 @@ class Mind:
                     turn.state['_doing'] = {'what': 'выполняет тул ' + call.name, 'since': time.monotonic()}
                     r = await agent_ctx.tools.run(call.name, call.arguments, tctx)
                     out_text, ok, summary, tainted, data = r.content, r.ok, r.summary, r.tainted, r.data
-                    if turn.unattended and (data or {}).get('denied'):
+                    if turn.unattended and (data or {}).get('denied') and data['denied'].get('rule') != 'steer':
                         turn.state.setdefault('_denied', []).append({'tool': call.name, **data['denied']})
                     if ok and r.model_parts:
                         # read_file, MCP и любой тул: вложения идут модели отдельным сообщением после пакета
@@ -619,7 +832,8 @@ class Mind:
                     if ok and call.name in ('read_file','look'):
                         turn.cost+=data.get('aux_cost',0)
                 digest = hashlib.sha256(json.dumps([key, ok, out_text], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-                turn.seen_calls.append(digest)
+                if not (data or {}).get('steered'):  # не начатый из-за слова хозяина вызов — не повтор
+                    turn.seen_calls.append(digest)
                 del turn.seen_calls[:-12]
                 for period in (1, 2):
                     n = period * 3
@@ -639,7 +853,9 @@ class Mind:
                     turn.tainted = True
                 tmsg = {"role": "tool", "tool_call_id": call.id, "name": call.name, "content": out_text}
                 if not ok:
-                    turn.state["tool_failed"] = True
+                    # Не начатый вызов, закрытая карточка или вопрос из-за слова хозяина — не сбой тула.
+                    if not ((data or {}).get('steered') or ((data or {}).get('denied') or {}).get('rule') == 'steer'):
+                        turn.state["tool_failed"] = True
                     tmsg["is_error"] = True
                 tmeta = {"ok": ok, "summary": summary, "tainted": tainted, "data": {k: v for k, v in (data or {}).items() if k != "checkpoint"} if data else {}}
                 agent_ctx.store.add_message(sid, tmsg, tmeta)

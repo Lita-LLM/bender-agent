@@ -199,7 +199,8 @@ function onServerEvent(ev) {
     setState({ pending: state.pending.filter((p) => p.id !== ev.id) });
   } else if (ev.type === "notify") {
     if (ev.update) refresh().catch(() => {});
-    toast(`${ev.kind === "remind" ? "⏰ " : ev.kind === "alarm" ? "🚨 " : ""}${ev.text}`.slice(0, 200), ev.kind === "alarm" ? "error" : "ok");
+    const icon = ev.kind === "remind" ? "⏰ " : ev.kind === "alarm" ? "🚨 " : ev.kind === "load" && !String(ev.text || "").startsWith("📈") ? "📈 " : "";
+    toast(`${icon}${ev.text}`.slice(0, 200), ev.kind === "alarm" ? "error" : "ok");
     if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification(ev.title || "Бендер", { body: ev.text });
   } else if (ev.type === "chatgpt_login" && ev.state === "done") {
     toast(ev.main_model ? `Вход в ChatGPT выполнен${ev.email ? ` (${ev.email})` : ""}. Главная модель — ${ev.main_model}; сменить можно в «Моделях».`

@@ -24,7 +24,7 @@ class DiagnosticsTest(TempDirCase):
         root=self.tmp/'absent'
         self.assertTrue(collect(root)['ok'])
         raw,plan=build(root)
-        self.assertEqual(len(plan['files']),5)
+        self.assertEqual(len(plan['files']),6)
         self.assertFalse(root.exists())
         for command in ('doctor','report'):
             env=dict(os.environ,PYTHONPATH=str(Path(__file__).resolve().parents[1]))

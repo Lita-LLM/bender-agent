@@ -123,7 +123,8 @@ class ClaudeCodeTest(TempDirCase):
             self.assertEqual(r1["secret_modes"], {"--mcp-config": "0o600", "--system-prompt-file": "0o600"})
             self.assertFalse(Path(argv[argv.index("--mcp-config") + 1]).exists())  # убран после хода
             # как у API-моделей: время, канал и метка реплики — без них Claude лез за временем в шелл
-            self.assertRegex(r1["prompt"], r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}, \w+ · канал: [^\]]+\]\n\[(?:пн|вт|ср|чт|пт|сб|вс) \d{2}\.\d{2} \d{2}:\d{2}\]\nпривет$")
+            # и одноразовая метка, по которой Claude Code узнает слово хозяина, вставленное посреди работы (тул Бендера)
+            self.assertRegex(r1["prompt"], r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}, \w+ · канал: [^\]]+\]\n\[Бендер: [^\n]*⟦хозяин [0-9a-f]{8}⟧[^\n]*\]\n\[(?:пн|вт|ср|чт|пт|сб|вс) \d{2}\.\d{2} \d{2}:\d{2}\]\nпривет$")
             self.assertIn("mcp__bender__recall", r1["system"])  # имена тулов, как их видит Claude Code
             self.assertEqual(r1["env"].get("CLAUDE_CODE_DISABLE_CLAUDE_MDS"), "1")  # чужие CLAUDE.md не подмешиваются
             self.assertEqual(r1["server"]["name"], "bender")

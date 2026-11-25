@@ -13,21 +13,21 @@ from . import telegram_ops as ops
 COMMANDS=(
  ('new','Новый разговор'),('chats','Выбрать разговор'),('agent','Кто отвечает: агенты стаи'),
  ('model','Модели: роли и выбор главной'),('effort','Усилия моделей этого агента'),
- ('stop','Прервать работу агента'),('members','Группа: кого бот видит (список людей)'),('compact','Сжать разговор (можно с указанием)'),
+ ('stop','Прервать работу агента'),('delivery','Сообщение во время работы: вставить, прервать, после'),('members','Группа: кого бот видит (список людей)'),('compact','Сжать разговор (можно с указанием)'),
  ('status','Самочувствие'),('fuel','Топливо и квоты'),('tasks','Задачи и результаты'),
  ('memory','Своя память'),('remember','Запомнить факт: /remember текст'),('recall','Найти в памяти: /recall слова'),
  ('skills','Активные навыки'),('files','Последние вложения'),
  ('live','Живой ответ: full, text, off; message, draft'),('voice','Голос: on, off, reply'),('style','Манера речи агента'),
  ('heart','Сердце и расписание'),('sleep','Состояние сна'),
  ('settings','Настройки'),('backup','Бекапы: снимок, проверка, починка'),('update','Обновление: проверить и поставить'),
- ('doctor','Самопроверка'),('journal','Бортжурнал: последние записи'),('load','Нагрузка: кто что делает'),('report','Технический отчёт без секретов'),
+ ('doctor','Самопроверка'),('journal','Бортжурнал: последние записи'),('load','Нагрузка: ЦП, память, кто что делает'),('report','Технический отчёт без секретов'),
  ('profile','Публичное лицо бота'),('avatar','JPG аватара бота'),('whoami','Кто я и с кем говорю'),
  ('estop','Стоп-кран: остановить всё'),('resume','Снять стоп-кран'),
  ('restart','Перезапустить Бендера'),('shutdown','Выключить Бендера'),('help','Команды по разделам'))
 GROUP=('stop','estop','resume','status','agent','chats','members','help')
 SCOPES=('default','all_private_chats','all_group_chats','all_chat_administrators')
 # models и agents — прежние имена: теперь это /model и /agent.
-ALIASES={'start':'help','стоп':'stop','продолжить':'resume','новая':'new','models':'model','agents':'agent'}
+ALIASES={'start':'help','стоп':'stop','продолжить':'resume','новая':'new','models':'model','agents':'agent','режим':'delivery','mode':'delivery'}
 # Кнопки этих выборов срабатывают один раз; остальные можно нажимать снова, срока у них нет.
 ONE_SHOT=('control','tidy','report','profile','topic_route','update')
 
@@ -44,14 +44,32 @@ def menu(ctx,group=False):
     return [{'command':name,'description':title} for name,title in entries[:100]]
 
 
+def mode_text(ctx,sid):
+    """Как сейчас доставляется сообщение хозяина, пришедшее во время хода (agent.new_message)."""
+    from ..mind import steer
+    current=steer.default(ctx);pending=ctx.mind.pending(sid)
+    text=('Сообщение во время работы: '+steer.title(current)+'.\n'
+          '↪ Вставлять — агент увидит его на ближайшем шаге: ждущая команда уходит в фон, карточка и вопрос закрываются.\n'
+          '⚡ Прерывать — ход останавливается, сразу новый с твоим сообщением.\n'
+          '⏳ После хода — ждёт конца хода и начинает следующий.\n'
+          'Разово — кнопки под статусом хода.')
+    note=steer.engine_note(ctx)
+    if note:text+='\n'+note
+    if ctx.settings.get('telegram','live_via','message')=='draft':
+        text+='\nСейчас живой ответ — черновиком: пока он открыт, Telegram не даёт писать. /live message — статус обычным сообщением.'
+    if pending['insert'] or pending['queue']:
+        text+=f"\nСейчас ждут: вставка — {pending['insert']}, после хода — {pending['queue']}."
+    return text
+
+
 def help_text(ctx):
     return ('Я — Бендер. Пиши как обычно. Команды хозяина:\n\n'
-      'Разговор\n/new — новый чат; /chats — выбрать; /agent — стая и кто отвечает; /model — модели по ролям и выбор главной (по провайдерам; /model часть названия — поиск); /effort — усилия моделей; /stop — прервать работу агента (писать дальше можно сразу); /compact — сжать сейчас, после команды можно написать, как пересказать.\n\n'
+      'Разговор\n/new — новый чат; /chats — выбрать; /agent — стая и кто отвечает; /model — модели по ролям и выбор главной (по провайдерам; /model часть названия — поиск); /effort — усилия моделей; /stop — прервать работу агента (писать дальше можно сразу); /delivery — что делать с твоим сообщением, пока агент работает: вставить в ход (по умолчанию), прервать и ответить или после хода; /compact — сжать сейчас, после команды можно написать, как пересказать.\n\n'
       'Состояние\n/status; /fuel; /tasks.\n\n'
       'Память\n/memory; /remember Купил Pi 5; /recall Raspberry; /skills; /files.\n\n'
       'Канал\n/live full|text|off; /voice on|off|reply (reply — отвечать голосом); /style — манера речи (/style off — свой голос).\n\n'
       'Фон\n/heart; /sleep; /sleep tidy — уборка памяти с подтверждением.\n\n'
-      'Обслуживание\n/settings; /backup — снимок, проверка, починка; /update — проверить и поставить (в личке, можно без бекапа один раз); /doctor — самопроверка; /journal — бортжурнал (/journal 20 или /journal alarm); /load — нагрузка и кто что делает; /report; /profile; /avatar; /whoami.\n\n'
+      'Обслуживание\n/settings; /backup — снимок, проверка, починка; /update — проверить и поставить (в личке, можно без бекапа один раз); /doctor — самопроверка; /journal — бортжурнал (/journal 20 или /journal alarm); /load — ЦП, память и кто что делает (/load report — отчёт о необычной нагрузке, /load manager — заведующий узлом); /report; /profile; /avatar; /whoami.\n\n'
       'Управление\n/estop — стоп-кран: всё остановить и не давать действовать до /resume; /restart; /shutdown (с подтверждением); /help.\n\n'
       'Навыки — слэш-команды\n'+ ('\n'.join('/'+name for name,_ in skills(ctx)) or 'Пока нет активных команд навыков.')+
       '\n/научись текст — сохранить навык; /убрать-навык имя — убрать из активных.')
@@ -74,10 +92,16 @@ class Commands:
         if not isinstance(configured,list) or any(not isinstance(code,str) or not re.fullmatch(r'[a-z]{2}',code) for code in configured):
             raise HumanError('telegram_languages','Для языков нужен список двухбуквенных кодов','Например ["ru", "en"], пустой список — все ISO 639-1.')
         known=self.host.store.meta_get('telegram:command_languages',[])
-        return sorted({'','ru','en',*(configured or LANGUAGES),*known})
+        # Все ISO — один раз на бота (как обещает настройка): дальше только найденные языки. Иначе каждое обновление
+        # меню (новая команда в выпуске) снова слало ~740 getMyCommands в первые минуты после старта.
+        swept=not configured and self.host.store.meta_get('telegram:commands_swept')==self.bot_key()
+        return sorted({'','ru','en',*(configured or ([] if swept else LANGUAGES)),*known})
+
+    def bot_key(self):
+        return hashlib.sha256((str(self.tg.settings().get('api_base'))+'\0'+str(self.tg.token())).encode()).hexdigest()[:16]
 
     def fingerprint(self):
-        content=[menu(self.host),menu(self.host,True),self.languages(),self.tg.settings().get('api_base'),self.tg.token(),1]
+        content=[menu(self.host),menu(self.host,True),self.host.settings.get('telegram','command_languages',[]),self.tg.settings().get('api_base'),self.tg.token(),1]
         return hashlib.sha256(json.dumps(content,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
 
     def start(self):
@@ -126,6 +150,7 @@ class Commands:
                     if self.tg._stopping or not self.host.settings.get('telegram','commands',True):return False
                     await self.tg.api('setMyCommands',{'scope':{'type':scope},'language_code':language,'commands':menu(self.host,short)})
             self.host.store.meta_set('telegram:command_languages',sorted(found-{''}))
+            if not self.host.settings.get('telegram','command_languages',[]):self.host.store.meta_set('telegram:commands_swept',self.bot_key())
             if self.fingerprint()==token:self.host.store.meta_set('telegram:commands_hash',token)
             else:self.pending=True
             self.host.journal.write('channel','Команды бота обновлены',actor='system',data={'languages':len(found),'commands':len(menu(self.host))})
@@ -217,10 +242,20 @@ class Commands:
         owner=ToolContext(ctx,actor='owner',session_id=sid)
         if command=='help':text=help_text(ctx)
         elif command=='stop':
+            # /stop цитатой на сообщение агента (ответ, статус хода, карточку) — этому агенту: адрес уже выбран цитатой.
             stopped=ctx.mind.stop()
             tasks=[t['id'] for t in ctx.team.all(limit=1000) if t['status'] in ('queued','running')]
             for tid in tasks:ctx.team.cancel(tid)
-            text=('⏹ Остановил: ходов — '+str(stopped)+(', задач команды — '+str(len(tasks)) if tasks else '')+'. Можно писать дальше.') if stopped or tasks else 'Сейчас ничего не идёт.'
+            others=self.working(ctx)
+            from .telegram_routes import agent_name
+            who=' «'+str(agent_name(ctx))+'»' if others or ctx.agent_id!='main' else ''
+            if stopped or tasks:
+                text=self.tg.signed(ctx,'⏹ Остановил'+who+': ходов — '+str(stopped)+(', задач команды — '+str(len(tasks)) if tasks else '')+'. Можно писать дальше.'
+                                    +('\nЕщё работают: '+', '.join(others)+' — /stop цитатой на его сообщение.' if others else ''))
+            elif others:
+                text=('Сейчас ничего не идёт'+(' у'+who if who else '')+'. Работают: '+', '.join(others)
+                      +'. Чтобы остановить одного — ответь /stop цитатой на его сообщение (или выбери его в /agent); всех сразу — /estop.')
+            else:text='Сейчас ничего не идёт.'
         elif command=='estop':
             self.host.halt();text='🛑 Стоп-кран: всё остановлено, агенты не действуют. /resume — снять.'
         elif command=='resume':
@@ -234,7 +269,23 @@ class Commands:
             choices=[('Дождаться ходов и '+('перезапустить' if command=='restart' else 'выключить'),{'action':command,'policy':'wait'}),
                      ('Прервать ходы и '+('перезапустить' if command=='restart' else 'выключить'),{'action':command,'policy':'interrupt'}),('Отмена',{'cancel':True})]
             await self.pick(ctx,chat,sid,'control',title,choices);return
-        elif command=='status':text=ctx.body.describe()
+        elif command=='status':
+            from ..mind import steer
+            text=ctx.body.describe()+'\nСообщение во время работы: '+steer.title(steer.default(ctx))+' (/delivery).'
+        elif command=='delivery':
+            from ..mind import steer
+            if arg:
+                mode=steer.normalize(arg)
+                if mode is None:raise HumanError('mode','Режим: insert, interrupt или queue','/delivery insert — вставлять в ход; /delivery interrupt — прерывать сразу; /delivery queue — после хода.')
+                await self.setting(ctx,sid,'agent',{'new_message':mode})
+                text='Сообщение во время работы: '+steer.title(mode)+'.'
+            else:
+                current=steer.default(ctx);pending=ctx.mind.pending(sid)
+                options=[(('✓ ' if mode==current else '')+steer.title(mode),{'default':mode}) for mode in steer.MODES]
+                if pending['insert'] or pending['queue']:
+                    options.append(('Ждущее сейчас: ⚡ прервать и ответить',{'pending':'interrupt'}))
+                    options.append(('Ждущее сейчас: ⏳ после хода',{'pending':'queue'}) if pending['insert'] else ('Ждущее сейчас: ↪ вставить',{'pending':'insert'}))
+                await self.pick(ctx,chat,sid,'new_message',mode_text(ctx,sid),options);return
         elif command=='fuel':text=self.host.fuel.brief() or 'Квоты ещё не измерены. Топливо → в пульте; это не полный бак.'
         elif command=='whoami':
             name=ctx.selfdir.identity().get('name') or ctx.agent_id
@@ -393,7 +444,17 @@ class Commands:
             text=('Бот видит в группе только этих людей: '+', '.join(map(str,current))+'. Остальных не запоминает и в контекст не берёт.'+(' Люди из списка будят бота упоминанием или ответом (превью: ход недоверенный, без действий, ответ текстом). /members wake off — выключить.' if row['wake'] else ' /members wake on — пусть они будят бота (превью).')) if current else 'Список людей пуст: правила прежние (контекст участников — по выключателю группы). /members add НОМЕР — ограничить видимость.'
         elif command=='doctor':text=await asyncio.to_thread(ops.doctor_text,self.host)
         elif command=='journal':text=ops.journal_text(ctx,arg)
-        elif command=='load':text=ops.load_text(self.host)
+        elif command=='load':
+            words=arg.split()
+            if words[:1]==['report'] or words[:1]==['отчёт']:
+                await self.load_report(chat);return
+            if words[:1]==['manager'] or words[:1]==['заведующий']:
+                await self.load_manager(ctx,chat,sid,' '.join(words[1:]));return
+            if words:raise HumanError('load','Что показать о нагрузке?','/load — числа и кто что делает; /load report — последний отчёт о необычном; /load manager — выбрать заведующего узлом.')
+            private=self.tg.owner() or {}
+            mine=int(chat)==(private.get('chat_id') or private.get('user_id'))
+            top=await asyncio.to_thread(self.host.load_watch.top_now) if mine else None  # процессы машины — только в личке
+            text=ops.load_text(self.host,top,mine)
         elif command=='report':
             from ..diagnostics.report import preview
             text='Состав технического отчёта без личных данных:\n'+json.dumps(preview(),ensure_ascii=False,indent=2)[:3000]
@@ -411,6 +472,60 @@ class Commands:
             else:text='Настройки в пульте; /settings имя_группы — посмотреть.\n'+'\n'.join(name+' · '+group.title for name,group in SCHEMA.items())
         else:raise HumanError('command','Команда пока недоступна','Открой /help.')
         await self.tg.send(chat,text)
+
+    def working(self,ctx):
+        """«🦊 Луна» — другие агенты стаи с идущим ходом (временные помощники — часть задачи своего родителя)."""
+        from ..agents.badge import line
+        out=[]
+        for agent in list(self.host.agents.loaded.values()):
+            if agent is ctx or getattr(agent,'agent_id',None)==ctx.agent_id:continue
+            try:
+                if self.host.agents.record(agent.agent_id)['temporary']:continue
+            except HumanError:continue
+            if any(agent.mind.running(sid) for sid in list(agent.mind.turns)):
+                try:out.append(line(agent))
+                except Exception:out.append(agent.agent_id)  # noqa: BLE001 — список не мешает /stop
+        return out
+
+    def private_only(self,chat,what):
+        private=self.tg.owner() or {}
+        if int(chat)!=(private.get('chat_id') or private.get('user_id')):
+            raise HumanError('load_private',what+' — в личке с ботом','В отчёте процессы машины; в группе он не показывается.')
+
+    async def load_report(self,chat):
+        """Последний отчёт о необычной нагрузке — текстом, длинный — файлом. Только в личке хозяина: там процессы машины."""
+        self.private_only(chat,'Отчёт о нагрузке')
+        found=await asyncio.to_thread(self.host.load_watch.latest)
+        if not found:
+            await self.tg.send(chat,'Отчётов о необычной нагрузке пока нет: он появляется, только когда нагрузка была необычной. /load — числа сейчас.');return
+        path,text=found
+        if len(text)<=3500:
+            await self.tg.send(chat,'```\n'+text.replace('```','ʼʼʼ').strip()+'\n```');return
+        from .telegram import TelegramError
+        try:
+            await self.tg.api('sendDocument',{'chat_id':chat,'caption':'Отчёт о нагрузке · '+path.rsplit('/',1)[-1]},
+                              files={'document':{'name':path.rsplit('/',1)[-1],'mime':'text/plain','bytes':text.encode('utf-8')}})
+        except TelegramError:
+            await self.tg.send(chat,'```\n'+text[:3400].replace('```','ʼʼʼ')+'\n…\n```\nЦеликом — '+path+' в папке данных.')
+
+    async def load_manager(self,ctx,chat,sid,arg):
+        """Заведующий узлом: агент, который разбирает отчёт о необычной нагрузке и объясняет его хозяину."""
+        self.private_only(chat,'Заведующего узлом выбирают')
+        if not arg:
+            current=self.host.load_watch.cfg.get('manager') or ''
+            options=[(('✓ ' if not current else '')+'Никто','')]+[(('✓ ' if a['id']==current else '')+a['name'],a['id']) for a in self.host.agents.public() if not a['archived']]
+            await self.pick(ctx,chat,sid,'load_manager','Заведующий узлом читает отчёт о необычной нагрузке, ищет причину и пишет тебе вывод. Сам ничего не завершает и не меняет; каждый разбор — ход модели.',options);return
+        value='' if arg.strip().lower() in ('off','выкл','никто','нет') else self.host.agents.resolve(arg.strip())
+        await self.tg.send(chat,await self.set_manager(ctx,sid,value))
+
+    async def set_manager(self,ctx,sid,value):
+        await self.setting(ctx,sid,'load',{'manager':value})
+        if not value:return 'Заведующий узлом не выбран: о необычной нагрузке узнаешь только ты.'
+        name=next((a['name'] for a in self.host.agents.public() if a['id']==value),value)
+        per=self.host.settings.get('load','manager_per_day',6)
+        when=self.host.settings.get('load','manager_on','all')
+        note='' if when!='off' else ' Сейчас «Когда звать заведующего» — никогда: включи в Настройках → Нагрузка.'
+        return f'Заведующий узлом: {name}. При необычной нагрузке он разберёт отчёт и напишет тебе вывод (не больше {per} разборов в сутки).'+note
 
     async def maintenance(self,action):
         backups=self.host.backups
@@ -499,11 +614,23 @@ class Commands:
                     await owner.check('settings','memory','убрать записи из ядра памяти по предложению сна')
                     result=ctx.sleep.apply_tidy(value['id']);text=f"🧹 Ядро прибрано: {result['applied']} из {result['total']}. Прежний вид — в self/history/."
                 else:ctx.sleep.reject_tidy();text='Уборка отклонена, ядро не тронуто.'
+            elif kind=='new_message':
+                from ..mind import steer
+                if value.get('default'):
+                    await owner.check('settings','agent','выбрать, как доставлять сообщение во время хода')
+                    ctx.settings.set('agent',{'new_message':value['default']},by='owner')
+                    text='Сообщение во время работы: '+steer.title(value['default'])+'.'
+                else:
+                    moved=await ctx.mind.redeliver(sid,value.get('pending'))
+                    text={'interrupt':'⚡ Прерываю ход и отвечаю.','queue':'⏳ Отвечу после хода.','insert':'↪ Вставлю в ход.'}.get(value.get('pending'),'Готово.') if moved else 'Ждущих сообщений уже нет.'
             elif kind=='manner':
                 from ..mind import manners
                 await owner.check('manner',value or 'off','выбрать манеру речи кнопкой хозяина')
                 _,item=manners.choose(ctx,value,actor='owner')
                 text='🎭 Манера: '+(f"«{item['name']}»" if item else 'свой голос')+'.'
+            elif kind=='load_manager':
+                self.private_only(chat,'Заведующего узлом выбирают')
+                text=await self.set_manager(ctx,sid,value)
             elif kind=='profile':
                 await self.tg.profile.apply(owner,value,reviewed=True)
                 text='Публичное лицо общего бота обновлено.'

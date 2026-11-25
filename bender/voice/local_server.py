@@ -79,6 +79,21 @@ class Engine:
             self.asr=onnx_asr.load_model('gigaam-v3-e2e-ctc',path=self.folder/'models'/'asr',quantization=self.manifest.get('quantization'),sess_options=options,providers=['CPUExecutionProvider'])
         return {'text':self.asr.recognize(np.asarray(samples,dtype=np.float32),sample_rate=rate)}
 
+    def load_voice(self,PiperVoice,model,**options):
+        """Голос Piper с тем же пределом потоков, что у распознавания. PiperVoice.load (piper-tts 1.3–1.8) создаёт
+        сессию onnxruntime без параметров — она берёт все ядра на каждую фразу, и узел упирается в 100%.
+        Собираем голос тем же способом, но со своими SessionOptions; другая версия Piper — обычная загрузка."""
+        try:
+            import onnxruntime as ort
+            from piper.config import PiperConfig
+            settings=ort.SessionOptions();settings.intra_op_num_threads=self.threads;settings.inter_op_num_threads=1
+            config=json.loads(Path(str(model)+'.json').read_text(encoding='utf-8'))
+            session=ort.InferenceSession(str(model),sess_options=settings,providers=['CPUExecutionProvider'])
+            extra={'espeak_data_dir':Path(options['espeak_data_dir'])} if options.get('espeak_data_dir') else {}
+            return PiperVoice(config=PiperConfig.from_dict(config),session=session,**extra)
+        except Exception:  # noqa: BLE001 — устройство Piper поменялось: голос важнее предела потоков
+            return PiperVoice.load(model,**options)
+
     def speak(self,text,fmt,voice=None,speed=1):
         from piper import PiperVoice,SynthesisConfig
         if not isinstance(text,str) or not text.strip() or len(text)>20000:raise ValueError('Нужен текст до 20 000 знаков.')
@@ -89,7 +104,7 @@ class Engine:
         if name not in self.voices:
             while len(self.voices)>=3:self.voices.pop(next(iter(self.voices)))  # в памяти не больше трёх голосов
             entry=self.installed()[name];espeak=entry.get('espeak_dir')  # голосам сообщества нужен свой словарь произношения
-            self.voices[name]=PiperVoice.load(self.folder/'models'/'tts'/entry['tts_file'],**({'espeak_data_dir':self.folder/'models'/'tts'/espeak} if espeak else {}))
+            self.voices[name]=self.load_voice(PiperVoice,self.folder/'models'/'tts'/entry['tts_file'],**({'espeak_data_dir':self.folder/'models'/'tts'/espeak} if espeak else {}))
         self.tts=self.voices[name]=self.voices.pop(name)
         output=io.BytesIO()
         with wave.open(output,'wb') as target:self.tts.synthesize_wav(text,target,**({'syn_config':SynthesisConfig(length_scale=1/speed)} if speed!=1 else {}))
