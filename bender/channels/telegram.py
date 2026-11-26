@@ -705,12 +705,32 @@ class Telegram:
     def _dispatch(self, u: dict) -> None:
         """Обработать обновление в фоне. Опрос никогда не ждёт обработку: долгая команда, бекап, расшифровка
         или пауза Telegram не должны отрезать бота от новых сообщений и кнопок одобрения."""
+        try:self._early_ack(u)
+        except Exception:pass  # знак «получил» — удобство, он не должен мешать приёму
         lane=self._lane(u)
         previous=self._lanes.get(lane) if lane is not None else None
         task=self._bg_task(self._ordered(previous,u))
         if lane is not None:
             self._lanes[lane]=task
             task.add_done_callback(lambda t,k=lane:self._lanes.pop(k,None) if self._lanes.get(k) is t else None)
+
+    def _early_ack(self, u: dict) -> None:
+        """Первый знак «получил» — «печатает…» при самом приёме, раньше очереди чата, расшифровки голоса, ожидания пачки
+        пересланного и запуска хода (охота 26.11: «пока бот не подал признака, что получил, проходит слишком много времени»).
+        Дальше «печатает…» и статус ведёт живой ход. Только обычные сообщения хозяина в личке: команды отвечают сами."""
+        msg=u.get('message')
+        if not msg or self._stopping or self.state!='ok':return
+        chat,frm=msg.get('chat') or {},msg.get('from') or {}
+        if chat.get('type')!='private' or chat.get('id') is None or frm.get('is_bot'):return
+        if str(msg.get('text') or msg.get('caption') or '').startswith('/'):return
+        owner=self.owner()
+        if not owner or frm.get('id')!=owner.get('user_id'):return
+        from .telegram_topics import Address
+        self._bg_task(self._typing_once(Address(chat['id'],msg.get('message_thread_id'))))
+
+    async def _typing_once(self, address) -> None:
+        try:await self.api('sendChatAction',{'chat_id':address,'action':'typing'},timeout=10)
+        except TelegramError:pass
 
     async def _ordered(self, previous, u: dict) -> None:
         if previous is not None and not previous.done():

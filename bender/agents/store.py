@@ -66,7 +66,7 @@ class NamespaceStore(Store):
     def __init__(self, shared, agent_id):
         self.path, self._lock = shared.path, shared._lock
         self._settings_root = shared._settings_root
-        self._migration_backup = shared._migration_backup
+        self._copy = shared._copy  # копия базы перед миграцией — одна на файл: у агента стаи не своя, а общая с хозяином
         self.agent_id = valid_id(agent_id)
         self.db = Connection(shared.db, agent_id)
         self.migrate('base', 1, BASE_SCHEMA)

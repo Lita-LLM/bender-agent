@@ -154,6 +154,11 @@ def load_text(host, top: list | None = None, private: bool = True) -> str:
         lines.append('Задачи команды идут.')
     loaded = sum(1 for r in agents.public() if r['loaded'])
     lines.append(f'Агентов в памяти: {loaded}.')
+    try:
+        size = host.store.size_bytes() / 2**20
+        lines.append(f'База: {size:.0f} МБ' + (', копия перед миграцией снимается в фоне' if host.store.copying() else '') + '.')
+    except Exception:  # noqa: BLE001 — размер базы не должен ломать остальной ответ
+        pass
     lines += timing_lines(getattr(host, 'telegram', None))
     return '\n'.join(lines)
 

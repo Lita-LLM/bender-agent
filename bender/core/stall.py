@@ -124,11 +124,13 @@ class LoopWatch:
         self._hang_file = None
         self._armed = 0.0
         self.tick = None          # раз в секунду с этого же потока: замер нагрузки (LoadWatch.tick), сам решает, пора ли
+        self.lock_probe = None    # () -> (номер потока, держащего замок базы, сколько секунд, сколько потоков ждут); читает без ожидания
         self.thread_cpu = True    # тики потоков на каждом стуке — для виновника зависания; выключается с анализом нагрузки
         self._baselines = deque(maxlen=3)  # (monotonic, тики потоков) последних здоровых стуков
         self._late = None         # (когда послан, задержка) стука, на который цикл ответил позже STALL
         self._covered = 0.0       # стуки, посланные раньше этого (monotonic), относятся к уже записанному зависанию
         self._own = None          # native id самого сторожа: себя виновником не называет
+        self._own_ident = None    # и его номер в Python (ключ sys._current_frames)
 
     def previous_hang(self) -> str:
         """Прошлый процесс вышел по таймеру зависания: забрать его стеки (файл переносится в hang-last.txt)."""
@@ -199,6 +201,7 @@ class LoopWatch:
 
     def _run(self) -> None:
         self._own = threading.get_native_id()
+        self._own_ident = threading.get_ident()
         while not self._stop.wait(self.interval):
             # Сначала — сколько цикл молчит, потом новый стук: иначе освободившийся после чужого тяжёлого
             # вызова цикл успевает ответить на свежий стук раньше замера, и зависание теряется.
@@ -212,8 +215,8 @@ class LoopWatch:
                 if self.current is None:
                     started = time.monotonic() - behind
                     before = self._baseline(started)
-                    self.current = {'started': time.time() - behind, 'first': stack, 'last': stack,
-                                    'stacks': thread_stacks() if before else {}, 'before': before}
+                    self.current = {'started': time.time() - behind, 'first': stack, 'last': stack, 'lock': self._lock_state(),
+                                    'stacks': thread_stacks(), 'before': before}
                 else:
                     self.current['last'] = stack  # стоит дольше — смотрим, не сдвинулось ли место
             elif self.current is not None:
@@ -249,6 +252,21 @@ class LoopWatch:
                 except Exception:  # noqa: BLE001 — замер нагрузки не должен останавливать сторожа цикла
                     pass
 
+    def _lock_state(self):
+        """Кто держит замок базы и сколько потоков его ждут: цикл часто стоит не сам, а в очереди за ним."""
+        probe = self.lock_probe
+        if probe is None:
+            return None
+        try:
+            ident, held, waiting = probe()
+        except Exception:  # noqa: BLE001 — диагностика не должна ронять сторожа
+            return None
+        if ident is None and not waiting:
+            return None
+        names = {t.ident: t.name for t in threading.enumerate()}
+        return {'ident': ident, 'name': names.get(ident, f'поток {ident}') if ident is not None else '', 'held': round(held, 1),
+                'waiting': waiting, 'main': ident == self.ident}
+
     def _baseline(self, started: float):
         """Тики потоков последнего здорового стука до начала зависания (monotonic): (когда, тики) или None."""
         chosen = None
@@ -272,11 +290,25 @@ class LoopWatch:
 
     def _blame(self, record) -> None:
         """Кто жёг процессор, пока цикл молчал: тики потоков от последнего здорового стука до оживления.
-        Главный поток ждал, а другой работал — «где встал» называет этот поток."""
+        Главный поток ждал, а другой работал — «где встал» называет этот поток. Не нашёлся такой — смотрим,
+        не стоял ли цикл в очереди за замком базы: тогда виновен тот, кто замок держал."""
         before, stacks = record.pop('before', None), record.pop('stacks', {})
         record['threads'] = []
-        if not before:
-            return
+        # Потоки, которые в начале зависания не ждали, а работали (или сидели в базе без процессора): их стеки — в отчёт.
+        record['active'] = [{'name': name, 'ident': ident, 'stack': stack[-14:]} for ident, (name, stack) in stacks.items()
+                            if ident not in (self.ident, self._own_ident) and stack and not waiting(stack)][:8]
+        if before:
+            self._blame_cpu(record, before, stacks)
+        lock = record.get('lock')
+        if (not record.get('culprit') and lock and lock.get('ident') is not None and not lock['main'] and lock['waiting']
+                and lock['held'] >= 0.5 * self.stall and lock['ident'] != self._own_ident):
+            # Цикл стоит в очереди за замком базы, а держит его другой поток: он и назван — с местом, где он сейчас.
+            stack = stacks.get(lock['ident'], ('', []))[1]
+            spot = ours(stack) if stack and not waiting(stack) else ''
+            record['culprit'] = lock['name']
+            record['where'] = f"поток «{lock['name']}» держал замок базы {lock['held']} с, цикл ждал" + (f" — {spot}" if spot else '')
+
+    def _blame_cpu(self, record, before, stacks) -> None:
         at, ticks = before
         rows = cpu.thread_cpu(ticks, cpu.thread_ticks(), time.monotonic() - at)
         for row in rows[:6]:
@@ -315,6 +347,11 @@ class LoopWatch:
                     + "Где встал главный поток:\n  " + ('\n  '.join(record['first']) or 'не видно: GIL держал другой поток, сторож проснулся уже после') + '\n')
             if record['last'] != record['first']:
                 text += 'Где был перед тем, как ожить:\n  ' + '\n  '.join(record['last']) + '\n'
+            lock = record.get('lock')
+            if lock:
+                who = 'главный поток (цикл)' if lock['main'] else (f"поток «{lock['name']}»" if lock['ident'] is not None else 'никто')
+                text += f"Замок базы в начале зависания: держит {who}" + (f" {lock['held']} с" if lock['ident'] is not None else '') + f"; ждут потоков: {lock['waiting']}\n"
+            printed = set()
             if record.get('threads'):
                 text += 'Процессор потоков за время зависания:\n' + ''.join(
                     f"  {t['name']}{' (цикл)' if t['main'] else ''}: {t['seconds']} с ({t['pct']}%)\n" for t in record['threads'])
@@ -322,6 +359,11 @@ class LoopWatch:
                     if t['stack'] and not t['main']:
                         note = ' (уже ждал работы: тяжёлый вызов закончился раньше, чем сторож смог посмотреть)' if waiting(t['stack']) else ''
                         text += f"Стек потока {t['name']} в начале зависания{note}:\n  " + '\n  '.join(t['stack']) + '\n'
+                        printed.add(t['name'])
+            # Остальные работавшие потоки: тот, кто держит замок или сидит в базе, процессор может и не жечь.
+            for item in record.get('active') or []:
+                if item['name'] not in printed:
+                    text += f"Стек потока {item['name']} (не ждал) в начале зависания:\n  " + '\n  '.join(item['stack']) + '\n'
             with self.path.open('a', encoding='utf-8') as stream:
                 stream.write(text + '\n')
             if self.path.stat().st_size > 2 * 1024 * 1024:  # не растёт бесконечно: оставляем свежую половину

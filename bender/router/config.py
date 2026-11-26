@@ -79,6 +79,40 @@ def normalize_base_url(url: str) -> str:
 
 
 
+GENERIC_NAMES = frozenset({'', 'провайдер', 'свой провайдер'})  # имена «по умолчанию»: вместо них — имя по адресу
+LOCAL_HOSTS = ('127.0.0.1', 'localhost', '::1', '0.0.0.0')
+
+
+def auto_name(base_url: str, kind: str = 'openai', taken=()) -> str:
+    """Имя провайдера по его адресу, когда хозяин его не дал: известный адрес — как в пресете («OpenRouter», «Ollama»,
+    «OmniRoute» по порту), чужой — сам адрес («llm.example.org», «Локальный 127.0.0.1:9000»). Занятое имя получает номер."""
+    sp = urlsplit(base_url or '')
+    host, port = (sp.hostname or '').lower(), sp.port
+    name = ''
+    for preset in PRESETS.values():
+        if preset.get('audio_only') or not preset.get('base_url'):
+            continue
+        known = urlsplit(preset['base_url'])
+        if (known.hostname or '').lower() == host and known.port == port:
+            name = preset['name']
+            break
+    if not name and host:
+        if host in LOCAL_HOSTS:
+            name = 'Локальный ' + host + (f':{port}' if port else '')
+        else:
+            label = re.sub(r'^(www|api)\.', '', host)
+            name = label + (f':{port}' if port else '')
+        if kind == 'anthropic':
+            name += ' (Anthropic)'
+    name = name or 'Провайдер'
+    busy = {str(n).strip().lower() for n in taken}
+    candidate, number = name, 1
+    while candidate.lower() in busy:
+        number += 1
+        candidate = f'{name} {number}'
+    return candidate
+
+
 GEMINI_CLI_NOTICE = ('Провайдер Gemini CLI убран: по подписке Google он больше не работает, его сменил Antigravity CLI. Модели Gemini подключи по ключу Google API '
                      '(пресет Google Gemini) или через OmniRoute — вход в аккаунт Google через посредника на твой риск, см. подсказку OmniRoute')
 
@@ -86,6 +120,7 @@ class ModelsConfig:
     def __init__(self, settings: Settings, secrets: Secrets):
         self.settings = settings
         self.secrets = secrets
+        self._name_generic()
         providers = self.providers()
         changed = False
         for pid, p in list(providers.items()):
@@ -104,6 +139,27 @@ class ModelsConfig:
             shown = self.settings.store.meta_get('models:removed_notice')
             if isinstance(shown, str) and shown.startswith('Провайдер Gemini CLI убран') and shown != GEMINI_CLI_NOTICE:
                 self.settings.store.meta_set('models:removed_notice', GEMINI_CLI_NOTICE)
+
+    @staticmethod
+    def _unnamed(provider) -> bool:
+        """Свой адрес с именем «Свой провайдер»: заданное хозяином имя и пресеты — не такие."""
+        return (isinstance(provider, dict) and not provider.get('preset') and bool(provider.get('base_url'))
+                and str(provider.get('name', '')).strip().lower() in GENERIC_NAMES - {''})
+
+    def _name_generic(self) -> None:
+        """Прежние провайдеры с именем «Свой провайдер» получают имя по адресу. Заданные хозяином имена не трогаются."""
+        if not any(self._unnamed(p) for p in self.providers().values()):
+            return
+        try:
+            with self.settings.transaction():
+                providers = self.providers()
+                for pid, p in list(providers.items()):
+                    if self._unnamed(p):
+                        others = [q.get('name', '') for k, q in providers.items() if k != pid and isinstance(q, dict)]
+                        providers[pid] = {**p, 'name': auto_name(p['base_url'], p.get('kind', 'openai'), others)}
+                self.settings.replace('providers', providers)
+        except HumanError:
+            pass  # только для чтения (doctor): имена поменяет работающий Бендер
 
     def providers(self) -> dict[str, dict]:
         return dict(self.settings.group("providers"))
@@ -125,6 +181,9 @@ class ModelsConfig:
         p = {"id": "p" + new_id()[-10:].lower(), "name": name or base.get("name") or "Провайдер", "kind": kind or base.get("kind", "openai"),
              "base_url": "" if cli else normalize_base_url(base_url or base.get("base_url", "")), "keys": [], "enabled": True, "timeout": 300, "parallel": 4,
              "is_local": bool(base.get("is_local")), "free": bool(base.get("free")), "created_at": time.time()}
+        if not preset and not cli and p["name"].strip().lower() in GENERIC_NAMES:
+            # Свой адрес без имени (или с именем «Свой провайдер»): имя берётся из самого адреса, чтобы в списке они различались.
+            p["name"] = auto_name(p["base_url"], p["kind"], [q.get("name", "") for q in self.providers().values()])
         if preset:
             p["preset"] = preset
             p["kind"] = base.get("kind", p["kind"])

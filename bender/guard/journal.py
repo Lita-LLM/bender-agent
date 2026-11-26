@@ -23,6 +23,7 @@ from ..core.fsutil import atomic_write
 from ..core.store import Store, dumps
 
 GENESIS = "0" * 64
+VERIFY_CHUNK = 500  # строк журнала за один запрос при проверке цепочки
 
 
 class Journal:
@@ -68,7 +69,10 @@ class Journal:
             seq = cur.lastrowid
         self._last = h
         try:
-            atomic_write(self.anchor, f"{seq}\t{h}\n".encode())
+            # Без fsync: запись журнала идёт в потоке цикла на каждое решение Предохранителя, а два fsync (файл и каталог)
+            # на SD-карте — десятки миллисекунд и больше. База при synchronous=NORMAL тоже не сбрасывается на каждую запись,
+            # так что якорь, надёжнее базы, лишь давал бы ложное «хвост обрезан» после потери питания.
+            atomic_write(self.anchor, f"{seq}\t{h}\n".encode(), durable=False)
         except OSError:
             pass
         if self.on_entry:
@@ -100,13 +104,19 @@ class Journal:
         prev = GENESIS
         n = 0
         last = 0
-        for r in self.store.q("SELECT * FROM journal ORDER BY seq"):
-            expect = self._sign(prev, r["ts"], r["kind"], r["actor"], r["summary"], r["data"])
-            if not hmac.compare_digest(expect, r["hash"]):
-                return {"ok": False, "checked": n, "broken_at": r["seq"]}
-            prev = r["hash"]
-            last = r["seq"]
-            n += 1
+        # Кусками по VERIFY_CHUNK: весь журнал одним запросом — сотни тысяч строк в памяти и общий замок базы занят,
+        # пока они читаются; между кусками замок свободен.
+        while True:
+            rows = self.store.q("SELECT * FROM journal WHERE seq > ? ORDER BY seq LIMIT ?", (last, VERIFY_CHUNK))
+            for r in rows:
+                expect = self._sign(prev, r["ts"], r["kind"], r["actor"], r["summary"], r["data"])
+                if not hmac.compare_digest(expect, r["hash"]):
+                    return {"ok": False, "checked": n, "broken_at": r["seq"]}
+                prev = r["hash"]
+                last = r["seq"]
+                n += 1
+            if len(rows) < VERIFY_CHUNK:
+                break
         anchor = self._read_anchor()
         if anchor:
             a_seq, a_hash = anchor

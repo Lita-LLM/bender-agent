@@ -148,9 +148,9 @@ class Live:
 
     async def run(self):
         try:
+            self._start_typing()  # раньше решения Предохранителя: оно пишет в журнал, а знак «получил» ждать не должен
             decision = await self.app.guard.check(Action('msg.send', 'owner', actor='system', to_owner=True, summary='Черновик активного хода Telegram'))
             if not decision.allowed: return
-            self._start_typing()
             while not self.closed:
                 if self.quiet:
                     await self.wait(); continue

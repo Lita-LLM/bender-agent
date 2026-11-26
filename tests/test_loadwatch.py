@@ -80,6 +80,48 @@ class ThreadsTest(TempDirCase):
         self.assertIn('Виновник: поток «asyncio', text)
         self.assertIn('Процессор потоков за время зависания', text)
 
+    @async_test
+    async def test_loop_waiting_in_the_line_for_the_database_lock_names_who_holds_it(self):
+        """Охота 26.11: «цикл стоял в store.py one» ничего не говорило — а стоял он за замком, который держал другой поток."""
+        from bender.core.stall import told
+        from bender.core.store import Store
+        store = Store(self.tmp / 'bender.db')
+        records, taken = [], threading.Event()
+
+        def holder():
+            with store._lock:
+                taken.set()
+                time.sleep(2.0)  # занят базой, процессор не жжёт: по тикам процессора такого виновника не найти
+
+        worker = threading.Thread(target=holder, name='держатель-замка-теста', daemon=True)
+        watch = LoopWatch(asyncio.get_running_loop(), records.append, self.tmp / 'stalls.txt', stall=0.6, interval=0.1)
+        watch.hang = 0
+        watch.lock_probe = store.lock_state
+        watch.start()
+        try:
+            await asyncio.sleep(0.5)
+            worker.start()
+            self.assertTrue(taken.wait(5))
+            store.one('SELECT 1')  # цикл встал в очереди за замком
+            for _ in range(60):
+                if records:
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            watch.stop()
+            worker.join(5)
+            store.close()
+        self.assertTrue(records)
+        record = records[0]
+        self.assertEqual(record.get('culprit'), 'держатель-замка-теста', record)
+        self.assertIn('держал замок базы', record['where'])
+        self.assertIn('holder', record['where'])  # и то место, где он сейчас
+        self.assertNotIn('цикл стоял в', told(record))
+        self.assertTrue(record['lock']['waiting'])
+        text = (self.tmp / 'stalls.txt').read_text(encoding='utf-8')
+        self.assertIn('Замок базы в начале зависания: держит поток «держатель-замка-теста»', text)
+        self.assertIn('Стек потока держатель-замка-теста', text)
+
     @unittest.skipUnless(PROC, 'нужен /proc/self/task')
     @async_test
     async def test_capture_finds_a_hot_python_thread_and_its_place(self):

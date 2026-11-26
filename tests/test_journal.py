@@ -33,6 +33,20 @@ class JournalTest(TempDirCase):
         store.x("UPDATE journal SET summary = 'подделка' WHERE seq = 2")
         self.assertEqual(j.verify()["broken_at"], 2)
 
+    def test_verification_in_pieces_gives_the_same_answers(self):
+        from bender.guard import journal as journal_module
+        saved = journal_module.VERIFY_CHUNK
+        journal_module.VERIFY_CHUNK = 7  # 20 записей — три куска, и ровно на границе кусков (14 и 21 не берём: 7, 14)
+        self.addCleanup(lambda: setattr(journal_module, "VERIFY_CHUNK", saved))
+        store, j = self.make()
+        for i in range(21):
+            j.write("test", f"запись {i}")
+        self.assertEqual(j.verify(), {"ok": True, "checked": 21, "broken_at": None})  # ровно три полных куска
+        j.write("test", "ещё одна")
+        self.assertEqual(j.verify(), {"ok": True, "checked": 22, "broken_at": None})
+        store.x("UPDATE journal SET summary = 'подделка' WHERE seq = 15")  # во втором-третьем куске
+        self.assertEqual(j.verify()["broken_at"], 15)
+
     def test_new_journal_after_restart_keeps_anchor(self):
         store, j = self.make()
         j.write("test", "раз")

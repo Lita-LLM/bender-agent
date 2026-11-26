@@ -595,11 +595,12 @@ class Sleep:
         if agent_ctx.vectors.available():
             c["vectors"] = await agent_ctx.vectors.fill(max_items=2000)
         try:
-            agent_ctx.store.x("PRAGMA optimize")
-            agent_ctx.store.x("PRAGMA wal_checkpoint(TRUNCATE)")
+            # Не в потоке цикла: ANALYZE по большой базе и проверка цепочки на слабом узле — секунды молчания всего Бендера.
+            await asyncio.to_thread(agent_ctx.store.x, "PRAGMA optimize")
+            await asyncio.to_thread(agent_ctx.store.checkpoint)
         except Exception as e:  # noqa: BLE001
             night.errors.append(f"база: {e}")
-        v = agent_ctx.journal.verify()
+        v = await asyncio.to_thread(agent_ctx.journal.verify)
         c["journal_ok"] = bool(v.get("ok"))
         if not v.get("ok"):
             night.errors.append("бортжурнал: цепочка не сходится — посмотри «Бортжурнал → Проверить цепочку»")

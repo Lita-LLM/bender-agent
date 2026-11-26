@@ -630,7 +630,7 @@ def create_web(app, *, allowed_hosts: set[str], token: str | None = None):
     @r.route("GET", "/api/journal/verify")
     @J
     async def journal_verify(req):
-        return app.journal.verify()
+        return await asyncio.to_thread(app.journal.verify)  # вся цепочка журнала — не в потоке цикла
 
     @r.route("GET", "/api/status")
     @J

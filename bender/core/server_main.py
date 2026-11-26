@@ -153,6 +153,7 @@ async def _serve(args, term: Term) -> int:
                           data={"seconds": record["seconds"], "where": record["where"], "stack": record["first"][-12:]})
 
     app.loop_watch = LoopWatch(loop, stalled, app.dirs.local / "stalls.txt")
+    app.loop_watch.lock_probe = app.store.lock_state  # в отчёте о зависании: кто держал замок базы
     hang = app.loop_watch.previous_hang()
     if hang:
         from .stall import hang_place
