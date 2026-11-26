@@ -68,7 +68,8 @@ class LocalVoiceTest(TempDirCase):
         cli=Secrets(path);self.assertEqual(cli.get('first'),'old-value')
         running.set('second','other-key')
         cli.set('voice-key','voice-token')
-        self.assertEqual(running.get('voice-key'),'voice-token')
+        with patch('bender.core.secrets.CHECK_EVERY',0):  # чужая запись видна работающему Бендеру в течение пары секунд (сверка файла не на каждое чтение)
+            self.assertEqual(running.get('voice-key'),'voice-token')
         self.assertEqual(cli.get('second'),'other-key')
         if os.name=='posix':self.assertEqual(path.stat().st_mode&0o777,0o600)
 

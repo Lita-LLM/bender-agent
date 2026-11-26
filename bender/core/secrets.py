@@ -16,6 +16,8 @@ from pathlib import Path
 from .fsutil import atomic_write_text
 from .errors import HumanError
 
+CHECK_EVERY = 2.0   # как часто сверять файл с памятью: ручная правка secrets.json подхватится в течение пары секунд
+
 
 def mask(value: str) -> str:
     if not value:
@@ -31,8 +33,13 @@ class Secrets:
         self._lock = threading.Lock()
         self._data: dict[str, dict] | None = None
         self._stamp = None
+        self._checked = 0.0   # когда файл в последний раз сверяли с памятью (monotonic)
 
-    def _load(self) -> dict[str, dict]:
+    def _load(self, fresh: bool = False) -> dict[str, dict]:
+        """fresh — запись: сверка с файлом всегда, иначе правка руками или из терминала потерялась бы при перезаписи."""
+        if self._data is not None and not fresh and time.monotonic() - self._checked < CHECK_EVERY:
+            return self._data   # stat файла на каждое чтение ключа — это был лишний вызов диска из цикла (охота 26.11: 5,5 с на stat)
+        self._checked = time.monotonic()
         try:
             info=self.path.stat();stamp=(info.st_mtime_ns,info.st_size,info.st_ino)
         except FileNotFoundError:stamp=None
@@ -59,6 +66,7 @@ class Secrets:
             pass
         self._data = data
         info=self.path.stat();self._stamp=(info.st_mtime_ns,info.st_size,info.st_ino)
+        self._checked = time.monotonic()
 
     def get(self, name: str) -> str | None:
         with self._lock:
@@ -67,7 +75,7 @@ class Secrets:
 
     def set(self, name: str, value: str, note: str = "", allow: dict | None = None) -> None:
         with self._lock:
-            data = dict(self._load())
+            data = dict(self._load(True))
             item = dict(data.get(name)) if isinstance(data.get(name), dict) else {}
             item.update({"value": value, "updated_at": time.time()})
             if note:
@@ -81,7 +89,7 @@ class Secrets:
     def set_allow(self, name: str, allow: dict) -> bool:
         """Поменять только «где можно» (хосты и тулы); значение ключа не трогается."""
         with self._lock:
-            data = dict(self._load())
+            data = dict(self._load(True))
             if not isinstance(data.get(name), dict):
                 return False
             item = dict(data[name])
@@ -94,7 +102,7 @@ class Secrets:
     def reuse(self, name: str, value: str, note: str = '', allow: dict | None = None) -> str:
         """Общий ключ хранится один раз; существующее другое значение не затирается."""
         with self._lock:
-            data=dict(self._load())
+            data=dict(self._load(True))
             found=name if data.get(name,{}).get('value')==value else next((k for k,v in data.items() if v.get('value')==value),None)
             if found:
                 item=dict(data[found]);before=dict(item)
@@ -116,7 +124,7 @@ class Secrets:
 
     def delete(self, name: str) -> bool:
         with self._lock:
-            data = dict(self._load())
+            data = dict(self._load(True))
             if name in data:
                 del data[name]
                 self._save(data)

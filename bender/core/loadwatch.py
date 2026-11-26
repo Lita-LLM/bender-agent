@@ -113,6 +113,9 @@ class LoadWatch:
                 self.samples = deque(self.samples, maxlen=size)
             if self.watch is not None:
                 self.watch.thread_cpu = bool(cfg.get('enabled'))
+                canary = getattr(self.watch, 'canary', None)
+                if canary is not None:
+                    canary.enabled = bool(cfg.get('enabled') and cfg.get('fs_probe', True))
             if not cfg.get('enabled'):
                 self._prev = None
                 self.active.clear()
@@ -590,7 +593,8 @@ class LoadWatch:
         watch = self.watch
         if watch is not None:
             out['lag'] = round(watch.lag, 2)
-            out['stalls'] = [{'at': cpu.stamp(r['started']), 'seconds': r['seconds'], 'where': r['where']} for r in list(watch.recent)[-5:]]
+            out['stalls'] = [{'at': cpu.stamp(r['started']), 'seconds': r['seconds'], 'where': r['where'], 'cause': r.get('cause', ''), 'facts': r.get('facts') or []}
+                             for r in list(watch.recent)[-5:]]
         return out
 
     @staticmethod
@@ -636,7 +640,30 @@ class LoadWatch:
         return {'format': 1, 'id': anomaly['id'], 'at': anomaly['started'], 'subject': anomaly['subject'], 'title': anomaly['title'],
                 'reason': anomaly['reason'], 'critical': anomaly['critical'], 'culprit': culprit, 'culprit_key': key,
                 'numbers': anomaly['numbers'], 'cores': self.cores(), 'snapshot': snap, 'context': context, 'history': self.summary(),
-                'recent': list(self.samples)[-30:], 'platform': cpu.platform_note()}
+                'recent': list(self.samples)[-30:], 'platform': cpu.platform_note(), 'filesystem': self.filesystem()}
+
+    def check_storage(self) -> str:
+        """Данные лежат на сетевой или FUSE-файловой системе — сказать хозяину один раз: SQLite там подвисает на секунды и портит базу.
+        Остальные носители (SD-карта, USB, вращающийся диск) только предупреждены в /load: ими пользуются все, шуметь не о чем."""
+        canary = getattr(self.watch, 'canary', None)
+        info = (canary.info if canary is not None else None) or {}
+        if not info.get('hard') or not self.cfg.get('enabled'):
+            return ''
+        store = self.app.store
+        if store.meta_get('load:fs_warned') == info['text']:
+            return ''
+        warn = str(info.get('warn') or '')
+        text = f"Данные Бендера лежат на {info['text']}. " + (warn[:1].upper() + warn[1:] + '.' if warn else '')
+        store.meta_set('load:fs_warned', info['text'])
+        self.app.journal.write('load', text, data={'filesystem': info['text']})
+        if self.cfg.get('notify') and self.loop is not None:
+            self._post(self.app.bus.publish, {'type': 'notify', 'kind': 'load', 'agent_id': '*', 'title': 'Данные Бендера', 'text': text})
+        return text
+
+    def filesystem(self) -> str:
+        """Где лежат данные и как отвечала файловая система: строка канарейки ('' — канарейки нет)."""
+        canary = getattr(self.watch, 'canary', None)
+        return canary.line() if canary is not None else ''
 
     def folder(self) -> Path:
         return self.app.dirs.local / 'load'
@@ -978,7 +1005,7 @@ def numbers_line(s: dict, cores: float | None = None) -> str:
 
 def alert_text(anomaly: dict) -> str:
     text = f"{anomaly['reason']}."
-    if anomaly.get('culprit'):
+    if anomaly.get('culprit') and anomaly['culprit'] not in anomaly['reason']:
         text += f" Виновник: {anomaly['culprit']}."
     if anomaly.get('busy'):
         text += f" Сейчас идёт: {', '.join(anomaly['busy'])}."
@@ -999,6 +1026,8 @@ def report_text(report: dict) -> str:
              f"Числа в момент срабатывания: {numbers_line(report.get('numbers') or {}, report.get('cores'))}"]
     if report.get('platform'):
         lines.append('Платформа: ' + report['platform'])
+    if report.get('filesystem'):
+        lines.append(report['filesystem'])
     history = report.get('history') or {}
     if history.get('samples'):
         parts = [f"{title} ср {history[key]['avg']} / макс {history[key]['max']}" for key, title in (('own', 'Бендер %'), ('sys', 'узел %'), ('load1', 'load'), ('lag', 'задержка цикла, с'))
@@ -1042,7 +1071,9 @@ def report_text(report: dict) -> str:
     if context.get('note'):
         lines.append('  ' + context['note'])
     for stall in context.get('stalls') or []:
-        lines.append(f"  зависание {stall['at']}: {stall['seconds']} с — {stall['where']}")
+        lines.append(f"  зависание {stall['at']}: {stall['seconds']} с — {stall['where']}" + (f". Причина: {stall['cause']}" if stall.get('cause') else ''))
+        for fact in stall.get('facts') or []:
+            lines.append('      ' + fact)
     recent = report.get('recent') or []
     if recent:
         lines.append('')

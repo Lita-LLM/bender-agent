@@ -14,7 +14,11 @@
 выражением, разбором JSON, SQLite) держит GIL. Пока цикл здоров, на каждом стуке запоминаются тики процессора
 каждого потока (/proc/self/task, десятки микросекунд); после зависания разница показывает, кто на самом деле
 жёг процессор, — и «где встал» называет этот поток. Тот же поток раз в секунду дёргает tick (анализ нагрузки
-LoadWatch сам решает, пора ли замер): отдельного потока опроса нет."""
+LoadWatch сам решает, пора ли замер): отдельного потока опроса нет.
+
+Где цикл стоял, мало: «стоял в stat» не говорит, почему stat занял восемь секунд. Рядом с тиками потоков сторож
+раз в секунду запоминает счётчики ядра (cause.py), а после остановки по их разнице и по канарейке файловой системы
+(fsprobe.py) пишет «причина»: диск, файловая система, память, очередь за процессором, замерший узел, сборка мусора."""
 from __future__ import annotations
 
 import faulthandler
@@ -27,6 +31,7 @@ from collections import deque
 from pathlib import Path
 
 from ..body import load as cpu
+from .cause import GcPauses, Sensors, explain
 
 STALL = 5.0      # с какого простоя это зависание, а не просто медленный шаг
 INTERVAL = 1.0
@@ -81,7 +86,8 @@ def ours(stack: list[str]) -> str:
 def told(record) -> str:
     """Зависание для сообщения: виновник найден — его фраза («поток … держал процессор»), иначе «цикл стоял в …»."""
     where = str(record.get('where') or 'неизвестно')
-    return where if record.get('culprit') or where.startswith('неизвестно') else 'цикл стоял в ' + where
+    text = where if record.get('culprit') or where.startswith('неизвестно') else 'цикл стоял в ' + where
+    return text + f". Причина: {record['cause']}" if record.get('cause') else text
 
 
 WAITING = ('select', 'poll', 'epoll', 'wait', 'acquire', '_worker', 'get', 'sleep', 'recv', 'recv_into', 'read', 'readline', 'communicate')
@@ -105,7 +111,8 @@ def thread_stacks(limit: int = 25) -> dict[int, tuple[str, list[str]]]:
 
 
 class LoopWatch:
-    def __init__(self, loop, on_stall, path: Path | None = None, *, stall: float = STALL, interval: float = INTERVAL):
+    def __init__(self, loop, on_stall, path: Path | None = None, *, stall: float = STALL, interval: float = INTERVAL,
+                 proc: Path = cpu.PROC, sys_root: Path = cpu.SYS):
         self.loop = loop
         self.on_stall = on_stall
         self.path = path
@@ -131,6 +138,12 @@ class LoopWatch:
         self._covered = 0.0       # стуки, посланные раньше этого (monotonic), относятся к уже записанному зависанию
         self._own = None          # native id самого сторожа: себя виновником не называет
         self._own_ident = None    # и его номер в Python (ключ sys._current_frames)
+        self.sensors = Sensors(self.native, proc, sys_root)   # счётчики ядра для «причины»
+        self.gc = GcPauses()
+        self.canary = None        # fsprobe.FsCanary: отвечает ли файловая система с данными (ставит server_main)
+        self._counters = deque(maxlen=3)   # снимки счётчиков последних здоровых стуков (раз в 2 с)
+        self._beats = 0
+        self._overslept = deque(maxlen=20)  # (time.time(), на сколько проснулся позже) — опоздания самого сторожа
 
     def previous_hang(self) -> str:
         """Прошлый процесс вышел по таймеру зависания: забрать его стеки (файл переносится в hang-last.txt)."""
@@ -162,11 +175,15 @@ class LoopWatch:
                 self._arm()
             except OSError:
                 self._hang_file = None
+        self.gc.install()
         self._thread = threading.Thread(target=self._run, name='bender-loop-watch', daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self.gc.remove()
+        if self.canary is not None:
+            self.canary.stop()
         if self._hang_file is not None:
             faulthandler.cancel_dump_traceback_later()
             try:
@@ -202,7 +219,14 @@ class LoopWatch:
     def _run(self) -> None:
         self._own = threading.get_native_id()
         self._own_ident = threading.get_ident()
-        while not self._stop.wait(self.interval):
+        while True:
+            asleep = time.monotonic()
+            if self._stop.wait(self.interval):
+                break
+            # Сторож ничего не ждёт, кроме таймера: проспал дольше срока — не выполнялся весь процесс (или кто-то держал GIL).
+            overslept = time.monotonic() - asleep - self.interval
+            if overslept > 1.0:
+                self._overslept.append((time.time(), overslept))
             # Сначала — сколько цикл молчит, потом новый стук: иначе освободившийся после чужого тяжёлого
             # вызова цикл успевает ответить на свежий стук раньше замера, и зависание теряется.
             behind = time.monotonic() - self.seen
@@ -216,7 +240,8 @@ class LoopWatch:
                     started = time.monotonic() - behind
                     before = self._baseline(started)
                     self.current = {'started': time.time() - behind, 'first': stack, 'last': stack, 'lock': self._lock_state(),
-                                    'stacks': thread_stacks(), 'before': before}
+                                    'stacks': thread_stacks(), 'before': before, 'counters': self._counters_before(started),
+                                    'stuck': self._safe(self.sensors.stuck)}
                 else:
                     self.current['last'] = stack  # стоит дольше — смотрим, не сдвинулось ли место
             elif self.current is not None:
@@ -233,7 +258,8 @@ class LoopWatch:
                 if sent > self._covered:
                     before = self._baseline(sent)
                     record = {'started': time.time() - (time.monotonic() - sent), 'first': [], 'last': [], 'seconds': round(delay, 1),
-                              'where': 'неизвестно: цикл и сторож ждали GIL', 'stacks': thread_stacks() if before else {}, 'before': before}
+                              'where': 'неизвестно: цикл и сторож ждали GIL', 'stacks': thread_stacks() if before else {}, 'before': before,
+                              'counters': self._counters_before(sent)}
                     if not self._finish(record):
                         return
             elif behind < self.interval + 1.0:
@@ -244,13 +270,61 @@ class LoopWatch:
                         self.thread_cpu = False
                     else:
                         self._baselines.append((time.monotonic(), ticks))
+                        if not self.sensors.disk and self.canary is not None and self.canary.info:
+                            self.sensors.disk = self.canary.info.get('device', '')   # раздел с данными — в /proc/diskstats
+                        self._beats += 1
+                        shot = self._safe(self.sensors.snapshot) if self._beats % 2 == 0 else None   # раз в 2 с: остановка видна после 5 с, этого хватает
+                        if shot:
+                            self._counters.append(shot)
                 elif self._baselines:
                     self._baselines.clear()  # анализ выключен: старая точка отсчёта обвинила бы не того
+                    self._counters.clear()
             if self.tick is not None:
                 try:
                     self.tick()
                 except Exception:  # noqa: BLE001 — замер нагрузки не должен останавливать сторожа цикла
                     pass
+
+    @staticmethod
+    def _safe(action):
+        """Диагностика не должна ронять сторожа: ошибка чтения /proc — просто нет этой улики."""
+        try:
+            return action()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _counters_before(self, started: float):
+        """Снимок счётчиков последнего здорового стука до начала остановки (monotonic)."""
+        chosen = None
+        for item in list(self._counters):
+            if item['mono'] <= started or chosen is None:
+                chosen = item
+        return chosen
+
+    def _explain(self, record) -> None:
+        """«Причина» по разнице счётчиков ядра, по канарейке файловой системы и по сборке мусора; числа — в record['facts']."""
+        before = record.pop('counters', None)
+        stuck = record.pop('stuck', None) or {}
+        record['cause'], record['facts'] = '', []
+        try:
+            start, seconds = record['started'], record['seconds']
+            end = start + seconds
+            canary = self.canary
+            notes = {'stuck': stuck, 'gc': self.gc.during(start, end),
+                     'self_late': round(sum(late for wall, late in list(self._overslept) if start <= wall <= end + 1.0), 1)}
+            if canary is not None and canary.enabled:
+                notes['canary'] = canary.during(start, end)
+                notes['fs'] = (canary.info or {}).get('text', '')
+                if not notes['canary']:
+                    from .fsprobe import ms
+                    worst = max((canary.worst(kind, seconds + 5.0) for kind in canary.series), default=0.0)
+                    if any(canary.series[kind] for kind in canary.series):
+                        notes['canary_fast'] = ms(worst)
+            after = self._safe(self.sensors.snapshot) if before else None
+            result = explain(before, after, seconds, notes)
+            record['cause'], record['facts'] = result['cause'], result['facts']
+        except Exception:  # noqa: BLE001 — причина необязательна: остановка записывается и без неё
+            pass
 
     def _lock_state(self):
         """Кто держит замок базы и сколько потоков его ждут: цикл часто стоит не сам, а в очереди за ним."""
@@ -280,6 +354,7 @@ class LoopWatch:
         self._covered = time.monotonic()
         self._late = None
         self._blame(record)
+        self._explain(record)
         self.recent.append(record)
         self._dump(record)
         try:
@@ -344,6 +419,7 @@ class LoopWatch:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             text = (f"=== {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record['started']))}: цикл стоял {record['seconds']} с\n"
                     + (f"Виновник: {record['where']}\n" if record.get('culprit') else '')
+                    + (f"Причина: {record['cause']}\n" if record.get('cause') else '')
                     + "Где встал главный поток:\n  " + ('\n  '.join(record['first']) or 'не видно: GIL держал другой поток, сторож проснулся уже после') + '\n')
             if record['last'] != record['first']:
                 text += 'Где был перед тем, как ожить:\n  ' + '\n  '.join(record['last']) + '\n'
@@ -364,6 +440,8 @@ class LoopWatch:
             for item in record.get('active') or []:
                 if item['name'] not in printed:
                     text += f"Стек потока {item['name']} (не ждал) в начале зависания:\n  " + '\n  '.join(item['stack']) + '\n'
+            for fact in record.get('facts') or []:
+                text += fact + '\n'
             with self.path.open('a', encoding='utf-8') as stream:
                 stream.write(text + '\n')
             if self.path.stat().st_size > 2 * 1024 * 1024:  # не растёт бесконечно: оставляем свежую половину
@@ -376,7 +454,7 @@ class LoopWatch:
         """Зависания, задевшие отрезок времени (time.time())."""
         found = [r for r in self.recent if r['started'] < end and r['started'] + r['seconds'] > start]
         if self.current and self.current['started'] < end:
-            current = {k: v for k, v in self.current.items() if k not in ('stacks', 'before')}
+            current = {k: v for k, v in self.current.items() if k not in ('stacks', 'before', 'counters', 'stuck')}
             found.append({**current, 'seconds': round(time.time() - self.current['started'], 1), 'where': ours(self.current['first'])})
         return found
 

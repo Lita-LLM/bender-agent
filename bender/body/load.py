@@ -156,6 +156,121 @@ def pressure(proc: Path = PROC) -> dict | None:
     return out or None
 
 
+# ------------------------------------------------------------------ что ждал поток: счётчики, разницу которых смотрят после остановки
+
+def task_stat(native: int, proc: Path = PROC) -> dict | None:
+    """Поток по /proc/self/task: state (R работает или ждёт процессор, S спит, D ждёт ядро — чаще всего диск), тики и страницы."""
+    text = _read(os.fspath(proc) + f'/self/task/{native}/stat', 1024)
+    if not text:
+        return None
+    try:
+        parts = text.rsplit(')', 1)[1].split()
+        return {'state': parts[0], 'minflt': int(parts[7]), 'majflt': int(parts[9]), 'ticks': int(parts[11]) + int(parts[12])}
+    except (IndexError, ValueError):
+        return None
+
+
+def task_sched(native: int, proc: Path = PROC) -> dict | None:
+    """Сколько секунд поток работал и сколько ждал в очереди планировщика, уже готовый (процессор занят другими, ограничен или отнят)."""
+    text = _read(os.fspath(proc) + f'/self/task/{native}/schedstat', 128)
+    try:
+        run, wait = (int(x) for x in (text or '').split()[:2])
+    except ValueError:
+        return None
+    return {'run': run / 1e9, 'wait': wait / 1e9}
+
+
+def task_wchan(native: int, proc: Path = PROC) -> str:
+    """В какой функции ядра спит поток («jbd2_log_wait_commit», «io_schedule», «futex_wait_queue»); '' — не спит или не видно."""
+    text = (_read(os.fspath(proc) + f'/self/task/{native}/wchan', 128) or '').strip()
+    return '' if text in ('', '0') else text
+
+
+def pressure_totals(proc: Path = PROC) -> dict | None:
+    """PSI в секундах накопленного ожидания: {'cpu_some', 'io_some', 'io_full', 'memory_some', 'memory_full'}. Разница двух замеров —
+    сколько задачи ждали за это время (в отличие от avg10, которое размазывает короткую паузу)."""
+    out = {}
+    for resource in ('cpu', 'io', 'memory'):
+        text = _read(proc / 'pressure' / resource)
+        for line in (text or '').splitlines():
+            kind, _, rest = line.partition(' ')
+            for item in rest.split():
+                key, _, value = item.partition('=')
+                if key == 'total':
+                    try:
+                        out[f'{resource}_{kind}'] = int(value) / 1e6
+                    except ValueError:
+                        pass
+    return out or None
+
+
+def system_ctxt(proc: Path = PROC) -> int | None:
+    """Переключения контекста по всему узлу: живой узел делает их сотни в секунду, замерший (пауза виртуалки) — ни одного."""
+    text = _read(proc / 'stat', 262144)
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.startswith('ctxt '):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def vm_counters(proc: Path = PROC) -> dict | None:
+    """Страницы, прочитанные и записанные в подкачку, и ошибки страниц с диском (весь узел)."""
+    text = _read(proc / 'vmstat', 65536)
+    if not text:
+        return None
+    out = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(' ')
+        if key in ('pswpin', 'pswpout', 'pgmajfault'):
+            try:
+                out[key] = int(value)
+            except ValueError:
+                pass
+    return out or None
+
+
+def own_cgroup(proc: Path = PROC, sys_root: Path = SYS) -> Path | None:
+    """Каталог cgroup v2 своего процесса (служба systemd, контейнер); None — v1, нет cgroup или корневая группа."""
+    text = _read(proc / 'self' / 'cgroup')
+    for line in (text or '').splitlines():
+        hierarchy, _, rest = line.partition(':')
+        _, _, path = rest.partition(':')
+        if hierarchy == '0' and path.strip('/'):
+            folder = sys_root / 'fs' / 'cgroup' / path.strip('/')
+            return folder if (folder / 'cpu.stat').exists() else None
+    return None
+
+
+def cgroup_throttle(folder: Path | None) -> float | None:
+    """Сколько секунд за всё время ограничивали процессор группы (квота CPUQuota или --cpus): счётчик, смотрят его разницу."""
+    text = _read(folder / 'cpu.stat', 2048) if folder else None
+    for line in (text or '').splitlines():
+        if line.startswith('throttled_usec '):
+            try:
+                return int(line.split()[1]) / 1e6
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def disk_counters(name: str, proc: Path = PROC) -> dict | None:
+    """Занятость блочного устройства по /proc/diskstats: busy — секунды, пока в нём были запросы, in_flight — сколько их сейчас."""
+    text = _read(proc / 'diskstats', 262144)
+    for line in (text or '').splitlines():
+        parts = line.split()
+        if len(parts) >= 14 and parts[2] == name:
+            try:
+                return {'busy': int(parts[12]) / 1000, 'in_flight': int(parts[11])}
+            except ValueError:
+                return None
+    return None
+
+
 def memory(proc: Path = PROC) -> dict | None:
     """Память и подкачка узла (МБ) и счётчик убийств OOM из /proc/vmstat."""
     text = _read(proc / 'meminfo')

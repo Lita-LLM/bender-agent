@@ -139,6 +139,7 @@ class Telegram:
         self._lanes = {}             # очередь чата → последняя задача обработки
         self.pause_until = 0.0       # до какого времени Telegram просил не писать (time.time())
         self.polled_at = None        # когда опрос последний раз вернулся (time.time())
+        self._owner_seen = None      # хозяин из базы, как его видели в последний раз: знак «получил» берёт его из памяти
         self.outage = None           # идущий обрыв связи: с какого времени, причина, сколько попыток
         self.last_outage = None      # прошлый обрыв — чтобы объяснить, почему сообщения пришли разом
         self._draft_supported = None
@@ -223,7 +224,9 @@ class Telegram:
 
     def owner(self) -> dict | None:
         o = self.app.store.meta_get(OWNER_META)
-        return o if isinstance(o, dict) and o.get("user_id") else None
+        o = o if isinstance(o, dict) and o.get("user_id") else None
+        self._owner_seen = o  # копия в памяти: знак «получил» не должен ждать базу
+        return o
 
     def public(self) -> dict:
         o = self.owner()
@@ -548,6 +551,7 @@ class Telegram:
 
     def unbind(self) -> None:
         self.app.store.meta_set(OWNER_META, None)
+        self._owner_seen = None
         self.app.journal.write("channel", "Telegram: хозяин отвязан", actor="owner")
 
     async def _restart_notice(self):
@@ -574,18 +578,23 @@ class Telegram:
                 self.commands.start()
                 self._bg_task(self._restart_notice())  # отправка может ждать паузу Telegram — опрос не ждёт
                 offset = int(self.app.store.meta_get(OFFSET_META, 0) or 0)
+                self.owner()  # хозяин в памяти до первого сообщения: знак «получил» не пойдёт за ним в базу
                 while not self._stopping:
                     updates = await self.api("getUpdates", {"offset": offset, "timeout": 50, "allowed_updates": ["message", "edited_message", "callback_query", "message_reaction", "my_chat_member", "stopped_message_generation"]}, timeout=65)
                     if self._stopping:return
                     previous, self.polled_at = self.polled_at, time.time()
+                    for u in updates or []:
+                        offset = max(offset, int(u.get("update_id", 0)) + 1)
+                        self._dispatch(u)
+                    if updates:
+                        # Сначала знак «получил» уходит в сеть, потом — журнал и запись смещения: они идут через базу и диск,
+                        # а диск бывает занят секундами (охота 26.11); хозяин ждёт «печатает…», а не записи в журнал.
+                        await asyncio.sleep(0)
                     try:
                         self._link_up()
                         self._lateness(updates, previous)
                     except Exception as e:  # noqa: BLE001 — диагностика никогда не мешает опросу
                         self.last_error = 'чёрный ящик Telegram: ' + str(e)[:200]
-                    for u in updates or []:
-                        offset = max(offset, int(u.get("update_id", 0)) + 1)
-                        self._dispatch(u)
                     if updates:
                         self.app.store.meta_set(OFFSET_META, offset)  # пишем, только когда что-то пришло
             except asyncio.CancelledError:
@@ -723,7 +732,7 @@ class Telegram:
         chat,frm=msg.get('chat') or {},msg.get('from') or {}
         if chat.get('type')!='private' or chat.get('id') is None or frm.get('is_bot'):return
         if str(msg.get('text') or msg.get('caption') or '').startswith('/'):return
-        owner=self.owner()
+        owner=self._owner_seen  # без базы: знак «получил» не ждёт замок и диск
         if not owner or frm.get('id')!=owner.get('user_id'):return
         from .telegram_topics import Address
         self._bg_task(self._typing_once(Address(chat['id'],msg.get('message_thread_id'))))
@@ -1015,6 +1024,7 @@ class Telegram:
                 o = {"user_id": frm.get("id"), "chat_id": chat.get("id"), "name": " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x),
                      "username": frm.get("username"), "bound_at": time.time()}
                 self.app.store.meta_set(OWNER_META, o)
+                self._owner_seen = o
                 self.code = None
                 self.app.journal.write("channel", f"Telegram: хозяин привязан ({o['name'] or o['username']})", actor="owner", data={"user_id": o["user_id"]})
                 self.app.bus.publish({"type": "channel", "channel": "telegram", "state": "bound"})

@@ -154,6 +154,8 @@ async def _serve(args, term: Term) -> int:
 
     app.loop_watch = LoopWatch(loop, stalled, app.dirs.local / "stalls.txt")
     app.loop_watch.lock_probe = app.store.lock_state  # в отчёте о зависании: кто держал замок базы
+    from .fsprobe import FsCanary
+    app.loop_watch.canary = FsCanary(app.dirs.db, app.dirs.local)  # отдельный поток: отвечает ли диск с данными, пока цикл стоит
     hang = app.loop_watch.previous_hang()
     if hang:
         from .stall import hang_place
@@ -168,6 +170,8 @@ async def _serve(args, term: Term) -> int:
     crashed = bool(load_boot(app.dirs.root).get("crashes"))  # Сторож помнит недавние падения ядра
     keeper = asyncio.ensure_future(housekeeping(housekeeping_delay(bool(hang or unclean or crashed or app.safe))))
     app.loop_watch.start()
+    app.loop_watch.canary.start()
+    loop.call_later(30, app.load_watch.check_storage)  # к этому времени канарейка уже знает, на чём лежат данные
     if not app.safe:
         app.heart.start()  # задачи по времени; в безопасном режиме сердце молчит
         app.telegram.start()  # каналы — тоже только в обычном режиме

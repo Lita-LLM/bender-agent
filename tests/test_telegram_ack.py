@@ -43,6 +43,41 @@ class AckTest(TempDirCase):
             await self.until(lambda: any('Слышу.' in s.get('text', '') for s in self.sent(env)))
 
     @async_test
+    async def test_typing_starts_before_the_offset_and_the_journal_are_written(self):
+        """Запись смещения и журнал идут через базу и диск; диск бывает занят секундами — «печатает…» не ждёт их."""
+        async with MindEnv(self.tmp) as env:
+            await self._up(env, owner=True)
+            tg, app = env.app.telegram, env.app
+            order, real_typing, real_set = [], tg._typing_once, app.store.meta_set
+
+            async def typing(address):
+                order.append('печатает')
+                return await real_typing(address)
+
+            def meta_set(key, value):
+                if key == 'telegram:offset':
+                    order.append('смещение')
+                return real_set(key, value)
+
+            env.script([{'text': 'Ок.'}])
+            with patch.object(tg, '_typing_once', typing), patch.object(app.store, 'meta_set', meta_set):
+                self.push(env, 'привет')
+                await self.until(lambda: 'смещение' in order)
+            self.assertEqual(order[:2], ['печатает', 'смещение'])
+
+    @async_test
+    async def test_the_sign_does_not_go_to_the_database_for_the_owner(self):
+        async with MindEnv(self.tmp) as env:
+            await self._up(env, owner=True)
+            tg = env.app.telegram
+            self.assertIsNotNone(tg._owner_seen)
+            reads = []
+            real = env.app.store.meta_get
+            with patch.object(env.app.store, 'meta_get', lambda key, *a, **k: (reads.append(key), real(key, *a, **k))[1]):
+                tg._early_ack({'message': {'message_id': 9, 'date': 1, 'text': 'привет', 'from': {'id': 42, 'is_bot': False}, 'chat': {'id': 42, 'type': 'private'}}})
+            self.assertEqual(reads, [], 'знак «получил» пошёл за хозяином в базу')
+
+    @async_test
     async def test_no_early_typing_for_commands_strangers_groups_and_edits(self):
         async with MindEnv(self.tmp) as env:
             await self._up(env, owner=True)

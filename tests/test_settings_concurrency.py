@@ -17,6 +17,11 @@ from tests.test_mind import MindEnv
 
 
 class SettingsConcurrencyTest(TempDirCase):
+    def setUp(self):
+        super().setUp()
+        # Здесь проверяется сама сверка с базой — без паузы между сверками; пауза и неожиданный замок — в tests/test_fsprobe.py
+        patcher=patch('bender.core.settings.CHECK_EVERY',0);patcher.start();self.addCleanup(patcher.stop)
+
     @async_test
     async def test_live_app_reacts_to_external_settings_on_its_event_loop(self):
         import asyncio

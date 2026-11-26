@@ -69,6 +69,7 @@ def _turned_on(old, new) -> bool:
 GUARD_PROFILES = {"careful": "Осторожный", "normal": "Обычный", "trust": "Доверие", "off": "Выключен"}
 
 SCHEMA: dict[str, Group] = {}
+CHECK_EVERY = 1.0   # как часто сверять версию базы: чужой процесс поменял настройки — Бендер увидит в течение секунды
 
 
 def _g(name: str, title: str, hint: str, *fields: Field) -> None:
@@ -278,6 +279,7 @@ _g("flock", "Стая", "Несколько агентов одного хозя
 _g('load', 'Нагрузка', 'Сколько процессора и памяти берут Бендер и весь узел. Замер — в памяти процесса, на диск пишется только отчёт о необычном (local/load). Меняет только хозяин.',
    Field('enabled', 'bool', True, 'Анализ потребления Бендера', 'Раз в несколько секунд — ЦП, память и задержка цикла, без записи на диск. Зависание называет поток, который держал процессор. Выключено — ничего не читается.'),
    Field('node', 'bool', True, 'Следить за всем узлом', 'Занятость процессора, средняя нагрузка, память, подкачка, давление и чужие процессы: кто грузит машину, даже если это не Бендер.'),
+   Field('fs_probe', 'bool', True, 'Проба файловой системы', 'Отдельный поток раз в секунду делает stat базы, раз в 5 секунд читает её, раз в минуту пишет байт с fsync. Если цикл встал, а проба зависла там же, — виснет диск или файловая система, и отчёт это скажет. Выключено — ничего не пробуется.'),
    Field('cpu_percent', 'int', 90, 'Порог ЦП Бендера, % ядра', 'Сколько одного ядра Бендер может держать подряд, прежде чем это считается необычным. Потоки складываются: больше 100 — несколько ядер.', min=30, max=400),
    Field('minutes', 'int', 2, 'Порог Бендера держится, минут', min=1, max=60),
    Field('node_percent', 'int', 95, 'Порог занятости узла, %', 'Весь процессор машины, всеми ядрами. Ещё правила узла: средняя нагрузка выше двух на ядро, кончается память, перегрев.', min=30, max=100),
@@ -601,6 +603,7 @@ class Settings:
         self.on_change = on_change
         self._cache: dict[str, dict] = {}
         self._cache_version = None
+        self._checked = 0.0   # когда в последний раз сверяли версию базы (monotonic)
         self._previous_cache = {}
         for row in store.q('SELECT grp FROM settings'):
             self._stored(row['grp'])
@@ -636,6 +639,7 @@ class Settings:
         self.store.meta_set('settings:limits-v2', {'changed': changed, 'at': time.time()})
 
     def _check_cache(self):
+        self._checked=time.monotonic()
         row=self.store.one('PRAGMA data_version')
         root=getattr(self.store,'_settings_root',self.store)
         version=(row[0] if row else 0,getattr(root,'_settings_revision',0))
@@ -662,7 +666,32 @@ class Settings:
         if self.on_change:
             self.store.after_commit(lambda:self.on_change(group,changes))
 
+    def _cached(self, group: str):
+        """Группа из кэша, не дожидаясь замка базы: настройки читает цикл десятки раз в секунду, и каждое чтение под замком —
+        очередь за любой записью (охота 26.11: цикл стоял 5–10 с на PRAGMA data_version, пока в другом потоке шла запись на медленный
+        диск). Свои записи видны сразу — по счётчику правок; чужой процесс — при сверке не чаще раза в CHECK_EVERY секунд, и сверка
+        идёт только если замок свободен (занят — кэш ещё свеж, сверка подождёт). None — кэша нет, читать из базы."""
+        entry = self._cache.get(group)
+        lock = getattr(self.store, '_lock', None)
+        if entry is None or self._cache_version is None or lock is None or lock._is_owned():
+            return None   # своя транзакция читает базу: в ней могут быть неподтверждённые правки
+        root = getattr(self.store, '_settings_root', self.store)
+        if getattr(root, '_settings_revision', 0) != self._cache_version[1]:
+            return None
+        if time.monotonic() - self._checked >= CHECK_EVERY:
+            if not lock.acquire(False):
+                return entry
+            try:
+                self._check_cache()
+            finally:
+                lock.release()
+            return self._cache.get(group)
+        return entry
+
     def _stored(self, group: str) -> dict:
+        cached = self._cached(group)
+        if cached is not None:
+            return cached
         if hasattr(self.store,'_locked'):
             with self.store._locked():return self._load_stored(group)
         return self._load_stored(group)
